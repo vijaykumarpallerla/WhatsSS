@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cognitive OS - WhatsApp Bot Config</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <div class="logo">🤖 WhatsApp Bot</div>
+            <a href="/whatsapp" class="btn-whatsapp">📱 WhatsApp Login</a>
+        </header>
+
+        <form action="/save" method="POST">
+            <div class="card">
+                <h2>📧 Email Settings</h2>
+                <div class="form-group">
+                    <label for="email_user">Sender Email (Gmail)</label>
+                    <input type="email" id="email_user" name="email_user" value="{{ config.email_user }}" required>
+                </div>
+                <div class="form-group">
+                    <label for="email_pass">App Password</label>
+                    <input type="password" id="email_pass" name="email_pass" value="{{ config.email_pass }}" required>
+                    <small>Use a Google App Password, not your login password.</small>
+                </div>
+                <div class="form-group">
+                    <label for="dest_email">Receiver Email</label>
+                    <input type="email" id="dest_email" name="dest_email" value="{{ config.dest_email }}" required>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>📱 Whitelist (Allowed Senders)</h2>
+                <p class="description">Add the phone numbers or Group IDs you want to accept messages from.</p>
+
+                <div id="whitelist-container">
+                    <!-- Dynamic rows will be added here -->
+                    {% for item in config.allowed_jids %}
+                    <div class="whitelist-row">
+                        <div class="input-group">
+                            <label>Chat ID (Phone/Group)</label>
+                            <input type="text" name="jids" value="{{ item.jid }}" placeholder="e.g. 9198..." required>
+                        </div>
+                        <div class="input-group">
+                            <label>Name (Optional)</label>
+                            <input type="text" name="names" value="{{ item.name }}" placeholder="e.g. My Group">
+                        </div>
+                        <button type="button" class="btn-remove" onclick="removeRow(this)">Remove</button>
+                    </div>
+                    {% endfor %}
+                </div>
+
+                <button type="button" class="btn-secondary" onclick="addRow()">+ Add New ID</button>
+            </div>
+
+            <div class="card">
+                <h2>🧠 AI Configuration (Groq)</h2>
+                <p class="description">Enter your Groq API Key to enable AI analysis. The bot will extract Role and
+                    Email from messages.</p>
+                <div class="form-group">
+                    <label for="groq_api_key">Groq API Key</label>
+                    <input type="password" id="groq_api_key" name="groq_api_key" value="{{ config.groq_api_key }}"
+                        placeholder="gsk_...">
+                    <small>Get a free key at <a href="https://console.groq.com" target="_blank"
+                            style="color: var(--accent-color);">console.groq.com</a></small>
+                </div>
+            </div>
+
+            <div class="actions">
+                <button type="submit" class="btn-primary">Save Configuration</button>
+            </div>
+        </form>
+
+        {% if message %}
+        <div class="notification {{ status }}">
+            {{ message }}
+        </div>
+        {% endif %}
+    </div>
+
+    <script>
+        function addRow() {
+            const container = document.getElementById('whitelist-container');
+            const div = document.createElement('div');
+            div.className = 'whitelist-row';
+            div.innerHTML = `
+                <div class="input-group">
+                    <label>Chat ID (Phone/Group)</label>
+                    <input type="text" name="jids" placeholder="e.g. 9198..." required>
+                </div>
+                <div class="input-group">
+                    <label>Name (Optional)</label>
+                    <input type="text" name="names" placeholder="e.g. My Group">
+                </div>
+                <button type="button" class="btn-remove" onclick="removeRow(this)">Remove</button>
+            `;
+            container.appendChild(div);
+        }
+
+        function removeRow(btn) {
+            const row = btn.closest('.whitelist-row');
+            row.remove();
+        }
+    </script>
+</body>
+
+</html>

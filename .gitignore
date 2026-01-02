@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# VS Code
+.vscode/
+
+# Database
+*.db
+cognitive.db
+
+# Build files
+build/
+dist/
+*.spec
+
+# Config (if contains sensitive data)
+config.json
+history.json
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

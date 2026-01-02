@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp QR Login</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        .qr-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 60vh;
+            text-align: center;
+        }
+
+        .qr-box {
+            background: var(--card-bg);
+            padding: 2rem;
+            border-radius: 20px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+            margin: 2rem 0;
+        }
+
+        .qr-image {
+            max-width: 300px;
+            width: 100%;
+            height: auto;
+            border-radius: 12px;
+            background: white;
+            padding: 1rem;
+        }
+
+        .status-text {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-top: 1.5rem;
+            color: var(--text-primary);
+        }
+
+        .status-subtext {
+            font-size: 0.95rem;
+            color: var(--text-secondary);
+            margin-top: 0.5rem;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 50px;
+            height: 50px;
+            border: 4px solid var(--border-color);
+            border-radius: 50%;
+            border-top-color: var(--accent-color);
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .success-icon {
+            font-size: 4rem;
+            color: var(--success-color);
+            animation: scaleIn 0.5s ease-out;
+        }
+
+        @keyframes scaleIn {
+            from {
+                transform: scale(0);
+            }
+            to {
+                transform: scale(1);
+            }
+        }
+
+        .back-btn {
+            margin-top: 2rem;
+            padding: 0.75rem 2rem;
+            background: var(--accent-color);
+            color: white;
+            text-decoration: none;
+            border-radius: 12px;
+            font-weight: 600;
+            transition: background 0.2s;
+        }
+
+        .back-btn:hover {
+            background: var(--accent-hover);
+        }
+
+        .logout-btn {
+            margin-top: 1rem;
+            padding: 0.75rem 2rem;
+            background: var(--danger-color);
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .logout-btn:hover {
+            background: var(--danger-hover);
+        }
+
+        .button-group {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+            margin-top: 2rem;
+        }
+
+        /* Group messages styles */
+        .messages-section {
+            margin-top: 3rem;
+            width: 100%;
+        }
+
+        .group-card {
+            background: var(--card-bg);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+        }
+
+        .group-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .group-info {
+            flex: 1;
+        }
+
+        .group-id {
+            font-size: 0.9rem;
+            color: var(--text-primary);
+            font-weight: 600;
+            word-break: break-all;
+        }
+
+        .whitelist-status {
+            display: inline-block;
+            margin-top: 0.5rem;
+            padding: 0.25rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .status-whitelisted {
+            background: rgba(16, 185, 129, 0.2);
+            color: var(--success-color);
+        }
+
+        .status-not-whitelisted {
+            background: rgba(239, 68, 68, 0.2);
+            color: var(--error-color);
+        }
+
+        .whitelist-btn {
+            padding: 0.5rem 1.5rem;
+            border: none;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 0.85rem;
+        }
+
+        .btn-add {
+            background: var(--success-color);
+            color: white;
+        }
+
+        .btn-add:hover {
+            background: #059669;
+            transform: translateY(-2px);
+        }
+
+        .btn-remove {
+            background: var(--danger-color);
+            color: white;
+        }
+
+        .btn-remove:hover {
+            background: var(--danger-hover);
+            transform: translateY(-2px);
+        }
+
+        .message-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        .message-item {
+            padding: 0.75rem;
+            margin-bottom: 0.5rem;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 8px;
+            border-left: 3px solid var(--accent-color);
+        }
+
+        .message-text {
+            color: var(--text-primary);
+            margin-bottom: 0.25rem;
+        }
+
+        .message-meta {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
+
+        .no-messages {
+            text-align: center;
+            color: var(--text-secondary);
+            padding: 2rem;
+            font-style: italic;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <div class="logo">📱 WhatsApp Login</div>
+            <a href="/" class="back-btn">← Back</a>
+        </header>
+
+        <div class="qr-container">
+            <div class="qr-box">
+                <div id="status-area">
+                    <div class="loading"></div>
+                    <p class="status-text">Waiting for QR Code...</p>
+                    <p class="status-subtext">Please wait while we generate your QR code</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Group Messages Section -->
+        <div class="messages-section" id="messages-section">
+            <h2 style="text-align: center; margin-bottom: 2rem; color: var(--text-primary);">📱 Group Messages</h2>
+            <div id="group-messages-container">
+                <p class="no-messages">No group messages yet...</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        async function checkQRStatus() {
+            try {
+                const response = await fetch('/qr_status');
+                const data = await response.json();
+                
+                const statusArea = document.getElementById('status-area');
+                
+                if (data.connected) {
+                    // Connected successfully
+                    statusArea.innerHTML = `
+                        <div class="success-icon">✓</div>
+                        <p class="status-text" style="color: var(--success-color);">Connected Successfully!</p>
+                        <p class="status-subtext">You are now logged in to WhatsApp</p>
+                        <div class="button-group">
+                            <button onclick="logoutWhatsApp()" class="logout-btn">Logout & Generate New QR</button>
+                        </div>
+                    `;
+                    // Stop polling
+                    clearInterval(pollInterval);
+                } else if (data.code) {
+                    // QR Code available
+                    statusArea.innerHTML = `
+                        <img src="data:image/png;base64,${data.code}" alt="QR Code" class="qr-image">
+                        <p class="status-text">Scan with WhatsApp</p>
+                        <p class="status-subtext">Open WhatsApp on your phone → Settings → Linked Devices → Link a Device</p>
+                    `;
+                } else {
+                    // Still waiting
+                    statusArea.innerHTML = `
+                        <div class="loading"></div>
+                        <p class="status-text">Waiting for QR Code...</p>
+                        <p class="status-subtext">Please wait while we generate your QR code</p>
+                    `;
+                }
+            } catch (error) {
+                console.error('Error checking QR status:', error);
+            }
+        }
+
+        // Check status every 1 second
+        let pollInterval = setInterval(checkQRStatus, 1000);
+        
+        // Initial check
+        checkQRStatus();
+        
+        // Fetch and display group messages
+        async function loadGroupMessages() {
+            try {
+                const response = await fetch('/group_messages');
+                const groups = await response.json();
+                
+                const container = document.getElementById('group-messages-container');
+                
+                if (Object.keys(groups).length === 0) {
+                    container.innerHTML = '<p class="no-messages">No group messages yet...</p>';
+                    return;
+                }
+                
+                let html = '';
+                for (const [groupId, groupData] of Object.entries(groups)) {
+                    const whitelisted = groupData.whitelisted;
+                    const messages = groupData.messages;
+                    
+                    html += `
+                        <div class="group-card" data-group-id="${groupId}">
+                            <div class="group-header">
+                                <div class="group-info">
+                                    <div class="group-id">Group ID: ${groupId}</div>
+                                    <span class="whitelist-status ${whitelisted ? 'status-whitelisted' : 'status-not-whitelisted'}">
+                                        ${whitelisted ? '✓ Whitelisted' : '✗ Not Whitelisted'}
+                                    </span>
+                                </div>
+                                <button class="whitelist-btn ${whitelisted ? 'btn-remove' : 'btn-add'}" 
+                                        onclick="toggleWhitelist('${groupId}', ${whitelisted})">
+                                    ${whitelisted ? 'Remove' : 'Add to Whitelist'}
+                                </button>
+                            </div>
+                            <ul class="message-list">
+                    `;
+                    
+                    messages.forEach((msg, index) => {
+                        html += `
+                            <li class="message-item">
+                                <div class="message-text">${index + 1}. ${escapeHtml(msg.text)}</div>
+                                <div class="message-meta">${msg.sender} - ${msg.timestamp}</div>
+                            </li>
+                        `;
+                    });
+                    
+                    html += `
+                            </ul>
+                        </div>
+                    `;
+                }
+                
+                container.innerHTML = html;
+            } catch (error) {
+                console.error('Error loading messages:', error);
+            }
+        }
+        
+        // Toggle whitelist status
+        async function toggleWhitelist(groupId, isWhitelisted) {
+            const endpoint = isWhitelisted ? '/remove_from_whitelist' : '/add_to_whitelist';
+            
+            try {
+                const response = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ group_id: groupId })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    // Reload messages to update UI
+                    loadGroupMessages();
+                } else {
+                    alert('Error: ' + data.message);
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+        }
+        
+        // Escape HTML to prevent XSS
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        // Load messages every 3 seconds
+        loadGroupMessages();
+        setInterval(loadGroupMessages, 3000);
+        
+        // Logout function
+        async function logoutWhatsApp() {
+            const statusArea = document.getElementById('status-area');
+            statusArea.innerHTML = `
+                <div class="loading"></div>
+                <p class="status-text">Logging out...</p>
+                <p class="status-subtext">Please wait</p>
+            `;
+            
+            try {
+                const response = await fetch('/logout', {
+                    method: 'POST'
+                });
+                const data = await response.json();
+                
+                if (data.success) {
+                    statusArea.innerHTML = `
+                        <div class="loading"></div>
+                        <p class="status-text">Generating New QR Code...</p>
+                        <p class="status-subtext">Please wait while we create a new login session (this may take 5-10 seconds)</p>
+                    `;
+                    // Restart polling to get new QR code
+                    pollInterval = setInterval(checkQRStatus, 1000);
+                } else {
+                    statusArea.innerHTML = `
+                        <p class="status-text" style="color: var(--error-color);">Logout Failed</p>
+                        <p class="status-subtext">${data.message}</p>
+                    `;
+                }
+            } catch (error) {
+                statusArea.innerHTML = `
+                    <p class="status-text" style="color: var(--error-color);">Error</p>
+                    <p class="status-subtext">Failed to logout: ${error.message}</p>
+                `;
+            }
+        }
+    </script>
+</body>
+
+</html>
