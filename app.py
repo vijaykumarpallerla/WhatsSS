@@ -12,8 +12,10 @@ import webbrowser
 import os
 import base64
 import io
+import sqlite3
 from pathlib import Path
-from flask import Flask, render_template, request, redirect, url_for, jsonify
+from flask import Flask, render_template, request, redirect, url_for, jsonify, session, flash
+from werkzeug.security import generate_password_hash, check_password_hash
 from neonize.client import NewClient
 from neonize.events import ConnectedEv, MessageEv, PairStatusEv
 from neonize.types import MessageServerID
@@ -23,738 +25,486 @@ import smtplib
 from email.mime.text import MIMEText
 from groq import Groq
 import qrcode
+import datetime
+
+def get_ist_time():
+    try:
+        # Try fetching from WorldTimeAPI
+        response = requests.get("http://worldtimeapi.org/api/timezone/Asia/Kolkata", timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            # Extract HH:MM from datetime string (e.g., "2023-10-27T14:30:00.123456+05:30")
+            dt_str = data["datetime"]
+            dt_obj = datetime.datetime.fromisoformat(dt_str)
+            return dt_obj.strftime("%H:%M")
+    except Exception as e:
+        print(f"Error fetching IST time: {e}")
+    return None
 
 # --- CONFIGURATION ---
 SECURITY_URL = "https://gist.githubusercontent.com/vijaykumarpallerla/4973d166642851341aa855a6169d2f5d/raw/gistfile1.txt"
 
-# --- AUTO-UPDATE CONFIGURATION ---
-CURRENT_VERSION = "1.1"
-VERSION_URL = "https://drive.google.com/uc?export=download&id=1VV7CuNmHrrxKtMCqDvdDi-mU5cMqfQCA"
-APP_URL = "https://drive.google.com/uc?export=download&id=1E7kG7cYhMTIN-4nZF6T-ut39KwQzeWXj"
-
-def check_for_updates():
-    print("Checking for Updates...")
-    try:
-        # 1. Get Online Version
-        response = requests.get(VERSION_URL)
-        if response.status_code != 200:
-            print("   [!] Could not check for updates (Server Error).")
-            return
-
-        online_version = response.text.strip()
-        print(f"   Current: {CURRENT_VERSION} | Online: {online_version}")
-
-        # 2. Compare Versions
-        if online_version != CURRENT_VERSION:
-            print(f"\nNew Version Available! ({online_version})")
-            choice = input("   Do you want to download and install it? (Y/N): ").strip().lower()
-            
-            if choice == 'y':
-                print("   Downloading...")
-                
-                # 3. Download new EXE
-                r = requests.get(APP_URL, stream=True)
-                with open("Update.exe", "wb") as f:
-                    for chunk in r.iter_content(chunk_size=1024):
-                        if chunk:
-                            f.write(chunk)
-                
-                print("   Download Complete. Installing...")
-                
-                # 4. Create Batch Script for safe update (Self-Destructs after use)
-                with open("update.bat", "w") as bat:
-                    bat.write(f"""
-@echo off
-timeout /t 2 /nobreak > NUL
-del "App.exe"
-ren "Update.exe" "App.exe"
-start "" "App.exe"
-del "%~f0"
-""")
-                
-                # 5. Run Batch and Exit
-                subprocess.Popen("update.bat", shell=True)
-                print("   Restarting...")
-                sys.exit()
-            else:
-                print("   Update Skipped. Launching current version...")
-            
-    except Exception as e:
-        print(f"   [!] Update Check Failed: {e}")
-
-def check_security():
-    print("Processing.")
-    device_id = None
-    
-    # --- METHOD 1: Try WMIC (Standard) ---
-    try:
-        cmd_output = subprocess.check_output("wmic csproduct get uuid", shell=True).decode()
-        # Parse WMIC Output (Remove "UUID" header)
-        lines = [line.strip() for line in cmd_output.splitlines() if line.strip()]
-        for line in lines:
-            if line.upper() != "UUID":
-                device_id = line.upper()
-                break
-    except Exception:
-        device_id = None
-
-    # --- METHOD 2: Try PowerShell (Fallback) ---
-    if not device_id:
-        try:
-            cmd = 'powershell -Command "Get-WmiObject Win32_ComputerSystemProduct | Select-Object -ExpandProperty UUID"'
-            # PowerShell output is usually just the UUID string
-            device_id = subprocess.check_output(cmd, shell=True).decode().strip().upper()
-        except Exception:
-            pass
-
-    # --- FINAL CHECK ---
-    if not device_id:
-        print("   [!] Could not determine Device ID.")
-        print("   (Make sure you are on Windows)")
-        sys.exit()
-
-    print(f"   Device ID: {device_id}")
-
-    try:
-        # 2. Download the list from Gist
-        response = requests.get(SECURITY_URL)
-        
-        if response.status_code != 200:
-            print("   [Error] Could not reach License Server.")
-            sys.exit()
-            
-        # 3. Check Match (Ignore '-' and ':')
-        # We clean the local ID to remove hyphens for comparison
-        clean_device_id = device_id.replace("-", "").strip()
-        
-        online_text = response.text.upper()
-        
-        # Parse the online list
-        allowed_ids = []
-        for line in online_text.splitlines():
-            # Remove common separators (hyphens, colons) and whitespace
-            clean_entry = line.replace(":", "").replace("-", "").strip()
-            if clean_entry:
-                allowed_ids.append(clean_entry)
-        
-        if clean_device_id in allowed_ids:
-            print("Access Granted.")
-            return True
-        else:
-            print("\n---------------------------------------")
-            print("ACCESS DENIED")
-            print(f"Your Device ID: {device_id}")
-            print("---------------------------------------")
-            input("Press Enter to Exit...")
-            sys.exit()
-            
-    except Exception as e:
-        print(f"   [Error] Connection Failed: {e}")
-        print("   Internet required.")
-        sys.exit()
-
-# --- RUN CHECKS ---
-check_for_updates()
-check_security()
-
 # --- FLASK APP SETUP ---
 app = Flask(__name__)
+app.secret_key = "super_secret_key_change_this_in_production"  # Required for sessions
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 
 # --- DATA STORAGE PATHS ---
-# App Folder Location (Default config template)
 APP_FOLDER = os.path.dirname(os.path.abspath(__file__))
-APP_CONFIG_FILE = os.path.join(APP_FOLDER, "config.json")
-
-# Local AppData Location (User-specific data)
 LOCAL_APPDATA = os.getenv('LOCALAPPDATA')
 USER_DATA_FOLDER = os.path.join(LOCAL_APPDATA, "WhatsappApp")
 os.makedirs(USER_DATA_FOLDER, exist_ok=True)
 
-USER_CONFIG_FILE = os.path.join(USER_DATA_FOLDER, "config.json")
-HISTORY_FILE = os.path.join(USER_DATA_FOLDER, "history.json")
+# Database for Users (Username/Password)
+USERS_DB_FILE = os.path.join(USER_DATA_FOLDER, "users.db")
 
-# Global Config Variable
-config = {}
+# --- GLOBAL MANAGERS ---
+# Active Clients: { user_id: ClientInstance }
+active_clients = {}
+# QR Data: { user_id: {"code": "base64...", "connected": False} }
+qr_data_store = {}
+# Group Messages: { user_id: { group_jid: [msgs] } }
+user_messages = {}
 
-# Global Cache for Deduplication
-# Format: { "message_hash": timestamp }
-seen_messages = {}
-DEDUPLICATION_WINDOW = 86400 # 24 Hours (in seconds)
+# --- DATABASE FUNCTIONS ---
+def get_db_connection():
+    conn = sqlite3.connect(USERS_DB_FILE, timeout=10)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-def load_history():
-    global seen_messages
+def init_db():
     try:
-        with open(HISTORY_FILE, "r") as f:
-            seen_messages = json.load(f)
-        # Clean up old entries immediately on load
-        cleanup_history()
-    except (FileNotFoundError, json.JSONDecodeError):
-        seen_messages = {}
-
-def save_history():
-    # Save to Local AppData (user-specific)
-    with open(HISTORY_FILE, "w") as f:
-        json.dump(seen_messages, f)
-
-def cleanup_history():
-    """Removes entries older than 24 hours"""
-    global seen_messages
-    current_time = time.time()
-    # Create a new dict with only recent messages
-    seen_messages = {h: t for h, t in seen_messages.items() if current_time - t < DEDUPLICATION_WINDOW}
-    save_history()
-
-def load_config():
-    global config
-    
-    # 1. Try to load from Local AppData (user-specific config)
-    if os.path.exists(USER_CONFIG_FILE):
-        try:
-            with open(USER_CONFIG_FILE, "r") as f:
-                config = json.load(f)
+        conn = get_db_connection()
+        c = conn.cursor()
+        # Create table with email column if not exists
+        c.execute('''CREATE TABLE IF NOT EXISTS users
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, email TEXT, password TEXT)''')
+        
+        # Migration: Check if email column exists, if not add it (for existing DBs)
+        c.execute("PRAGMA table_info(users)")
+        columns = [info[1] for info in c.fetchall()]
+        if "email" not in columns:
+            print("Migrating DB: Adding email column...")
+            try:
+                c.execute("ALTER TABLE users ADD COLUMN email TEXT")
+            except Exception as e:
+                print(f"Migration Error: {e}")
                 
-            # --- MIGRATION: Convert old list of strings to list of objects ---
-            if "allowed_jids" in config and config["allowed_jids"] and isinstance(config["allowed_jids"][0], str):
-                print("Migrating config to new format...")
-                config["allowed_jids"] = [{"jid": jid, "name": ""} for jid in config["allowed_jids"]]
-                save_config()
-            return
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
-    
-    # 2. Fallback: Try to load from App Folder (default template)
-    if os.path.exists(APP_CONFIG_FILE):
+        conn.commit()
+    except Exception as e:
+        print(f"DB Init Error: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+def get_user(username):
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT * FROM users WHERE username=?", (username,))
+        user = c.fetchone()
+        return user
+    except Exception as e:
+        print(f"DB Error (get_user): {e}")
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+def get_user_by_email(email):
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT * FROM users WHERE email=?", (email,))
+        user = c.fetchone()
+        return user
+    except Exception as e:
+        print(f"DB Error (get_user_by_email): {e}")
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+def create_user(username, email, password):
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        hashed_pw = generate_password_hash(password)
+        c.execute("INSERT INTO users (username, email, password) VALUES (?, ?, ?)", (username, email, hashed_pw))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+    except Exception as e:
+        print(f"DB Error (create_user): {e}")
+        return False
+    finally:
+        if conn:
+            conn.close()
+
+def update_password(user_id, new_password):
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        hashed_pw = generate_password_hash(new_password)
+        c.execute("UPDATE users SET password=? WHERE id=?", (hashed_pw, user_id))
+        conn.commit()
+    except Exception as e:
+        print(f"DB Error (update_password): {e}")
+    finally:
+        if conn:
+            conn.close()
+
+# --- USER CONFIG MANAGEMENT ---
+def get_user_config_path(user_id):
+    user_folder = os.path.join(USER_DATA_FOLDER, f"user_{user_id}")
+    os.makedirs(user_folder, exist_ok=True)
+    return os.path.join(user_folder, "config.json")
+
+def get_user_db_path(user_id):
+    user_folder = os.path.join(USER_DATA_FOLDER, f"user_{user_id}")
+    os.makedirs(user_folder, exist_ok=True)
+    return os.path.join(user_folder, "cognitive.db")
+
+def load_user_config(user_id):
+    path = get_user_config_path(user_id)
+    if os.path.exists(path):
         try:
-            with open(APP_CONFIG_FILE, "r") as f:
-                config = json.load(f)
-                print("Loaded config from App Folder. Saving to Local AppData...")
-                save_config()  # Copy to Local AppData for future use
-            return
-        except (FileNotFoundError, json.JSONDecodeError):
+            with open(path, "r") as f:
+                return json.load(f)
+        except:
             pass
-    
-    # 3. Create default config if neither exists
-    config = {
+    return {
         "email_user": "",
         "email_pass": "",
         "dest_email": "",
         "allowed_jids": [],
-        "groq_api_key": ""
+        "groq_api_key": "",
+        "auto_allow": False,
+        "start_time": "09:00",
+        "end_time": "18:00"
     }
-    save_config()
 
-def save_config():
-    # Always save to Local AppData (user-specific data)
-    with open(USER_CONFIG_FILE, "w") as f:
-        json.dump(config, f, indent=4)
-    
-    # Also save to App Folder as backup (default template)
-    with open(APP_CONFIG_FILE, "w") as f:
+def save_user_config(user_id, config):
+    path = get_user_config_path(user_id)
+    with open(path, "w") as f:
         json.dump(config, f, indent=4)
 
-# Initialize the Client (Creates a 'cognitive.db' file in Local AppData to save session)
-COGNITIVE_DB_PATH = os.path.join(USER_DATA_FOLDER, "cognitive.db")
-client = NewClient(COGNITIVE_DB_PATH)
+# --- BOT LOGIC (Per User) ---
+def start_bot_for_user(user_id):
+    if user_id in active_clients:
+        return # Already running
 
-# Store QR code data
-qr_data = {"code": None, "connected": False}
-
-# Store group messages: {group_id: [{"text": "msg", "timestamp": "2:30 PM", "sender": "Name"}]}
-group_messages = {}
-
-def handle_qr_code(client_obj, qr_code_string):
-    """Handle QR code when received from neonize"""
-    global qr_data
-    try:
-        print(f"\n{'='*50}")
-        print(f"QR Code Received via client.qr()! Length: {len(qr_code_string)}")
-        print(f"{'='*50}\n")
-        
-        # Generate QR code as base64 PNG
-        qr = qrcode.QRCode(version=1, box_size=10, border=4)
-        qr.add_data(qr_code_string)
-        qr.make(fit=True)
-        img = qr.make_image(fill_color="black", back_color="white")
-        
-        # Convert to base64
-        buffered = io.BytesIO()
-        img.save(buffered, format="PNG")
-        img_str = base64.b64encode(buffered.getvalue()).decode()
-        
-        qr_data["code"] = img_str
-        qr_data["connected"] = False
-        
-        print("✓ QR Code converted to base64 and stored!")
-        print(f"✓ Visit http://localhost:5000/whatsapp to scan it!")
-        print(f"{'='*50}\n")
-    except Exception as e:
-        print(f"Error in handle_qr_code: {e}")
-        import traceback
-        traceback.print_exc()
-
-# Register QR code callback
-client.qr(handle_qr_code)
-
-print("Client initialized. QR callback registered. Registering event handlers...")
-
-def is_duplicate(text):
-    """
-    Checks if the message text has been processed recently.
-    Returns True if duplicate, False otherwise.
-    """
-    # Normalize text: remove leading/trailing whitespace and convert to lowercase
-    normalized_text = text.strip().lower()
+    print(f"Starting bot for User ID: {user_id}")
     
-    # Create a unique hash for the message content
-    msg_hash = hashlib.md5(normalized_text.encode('utf-8')).hexdigest()
+    db_path = get_user_db_path(user_id)
+    client = NewClient(db_path)
     
-    current_time = time.time()
-    
-    # Check if hash exists in cache
-    if msg_hash in seen_messages:
-        last_seen = seen_messages[msg_hash]
-        # If seen within the window, it's a duplicate
-        if current_time - last_seen < DEDUPLICATION_WINDOW:
-            return True
+    # Initialize storage for this user
+    if user_id not in qr_data_store:
+        qr_data_store[user_id] = {"code": None, "connected": False}
+    if user_id not in user_messages:
+        user_messages[user_id] = {}
+
+    # --- EVENT HANDLERS ---
+    @client.qr
+    def handle_qr(client, qr_code_string):
+        try:
+            print(f"[User {user_id}] QR Code Received")
+            qr = qrcode.QRCode(version=1, box_size=10, border=4)
+            qr.add_data(qr_code_string)
+            qr.make(fit=True)
+            img = qr.make_image(fill_color="black", back_color="white")
+            buffered = io.BytesIO()
+            img.save(buffered, format="PNG")
+            img_str = base64.b64encode(buffered.getvalue()).decode()
             
-    # Update the timestamp (or add new entry)
-    seen_messages[msg_hash] = current_time
-    save_history() # Save to file immediately
-    return False
+            qr_data_store[user_id]["code"] = img_str
+            qr_data_store[user_id]["connected"] = False
+        except Exception as e:
+            print(f"QR Error: {e}")
 
-def send_email_alert(sender, message, roles=None, emails=None):
-    # Reload config to ensure we use latest settings
-    load_config() 
-    
-    try:
-        subject = f"Candidate Alert: {sender}"
-        reply_to = None
+    @client.event(ConnectedEv)
+    def on_connected(client, event):
+        print(f"[User {user_id}] Connected!")
+        qr_data_store[user_id]["connected"] = True
+        qr_data_store[user_id]["code"] = None
+
+    @client.event(MessageEv)
+    def on_message(client, message):
+        # 1. GET INFO
+        chat_id = message.Info.MessageSource.Chat
+        jid = chat_id.User
+        is_group = "g.us" in str(chat_id)
+        text = message.Message.conversation or message.Message.extendedTextMessage.text
         
-        if roles:
-            # Join multiple roles with comma
-            role_str = ", ".join(roles)
-            subject = f"New Jobs: {role_str}"
+        # 2. Store Group Messages
+        if is_group and text:
+            timestamp = time.strftime("%I:%M %p")
+            sender_name = getattr(message.Info, "PushName", getattr(message.Info, "push_name", "Unknown"))
             
-        if emails:
-            # Join multiple emails with comma for Reply-To
-            # Use set() to remove duplicates, then sort for consistency
-            unique_emails = sorted(list(set(emails)))
-            reply_to = ", ".join(unique_emails)
+            if jid not in user_messages[user_id]:
+                user_messages[user_id][jid] = []
             
-        msg = MIMEText(f"SENDER ID: {sender}\n\nROLES: {roles}\nREPLY-TO: {reply_to}\n\nMESSAGE: {message}")
-        msg['Subject'] = subject
-        msg['From'] = config["email_user"]
-        msg['To'] = config["dest_email"]
-        
-        if reply_to:
-            msg.add_header('Reply-To', reply_to)
+            user_messages[user_id][jid].append({
+                "text": text,
+                "timestamp": timestamp,
+                "sender": sender_name
+            })
+            # Keep last 50
+            if len(user_messages[user_id][jid]) > 50:
+                user_messages[user_id][jid] = user_messages[user_id][jid][-50:]
 
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.starttls()
-            server.login(config["email_user"], config["email_pass"])
-            server.send_message(msg)
-        print(f"   [✓] Email sent for {sender}")
-    except Exception as e:
-        print(f"   [X] Email Failed: {e}")
-
-def analyze_with_groq(text):
-    """
-    Uses Groq AI to extract Role and Email.
-    Returns: ([roles], [emails]) or ([], [])
-    """
-    api_key = config.get("groq_api_key")
-    if not api_key:
-        print("   [!] No Groq API Key configured. Skipping AI.")
-        return [], []
-
-    try:
-        client = Groq(api_key=api_key)
+        # 3. Process Logic (Whitelist + AI)
+        config = load_user_config(user_id)
+        allowed_jids = {item["jid"] for item in config.get("allowed_jids", [])}
         
-        prompt = f"""
-        Analyze the text below.
-        
-        CLASSIFICATION RULES:
-        1. **REJECT (Return empty jobs list)** if the message is:
-           - Selling candidates/consultants (e.g., "Active consultants", "On our bench", "Hotlist").
-           - **CRITICAL:** If the message says "on my BENCH" or "my consultants", REJECT IT, even if it says "NOT FOR BENCHSALES".
-           - Listing profiles with "Skills", "Visa", "Experience", "Genuine profile", "PP NUMBER".
-           - Asking for requirements (e.g., "Please share requirements", "Let me know if you have requirements").
-           - "Proxy Support", "Job Support", or "Training".
-        
-        2. **ACCEPT (Extract Data)** ONLY if the message is:
-           - A **Recruiter** explicitly looking to **HIRE** a candidate for a specific role.
-           - Contains words like "Urgent Requirement", "We are looking for", "Need a [Role]".
-        
-        EXTRACTION INSTRUCTIONS:
-        - If ACCEPTED, extract ALL 'Job Roles' and 'Email Addresses'.
-        - Return ONLY a JSON object with a key "jobs" (List of objects with "role", "email").
-        - If REJECTED, return "jobs": [].
-        
-        Text: "{text}"
-        """
-        
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-            model="llama-3.1-8b-instant",
-            response_format={"type": "json_object"},
-        )
-        
-        result = json.loads(chat_completion.choices[0].message.content)
-        jobs = result.get("jobs", [])
-        
-        roles = [j["role"] for j in jobs if j.get("role")]
-        emails = [j["email"] for j in jobs if j.get("email")]
-        
-        return roles, emails
-        
-    except Exception as e:
-        print(f"   [X] Groq AI Error: {e}")
-        return [], []
-
-@client.event(ConnectedEv)
-def on_connected(client: NewClient, event: ConnectedEv):
-    global qr_data
-    qr_data["connected"] = True
-    qr_data["code"] = None
-    print("Connected to WhatsApp!")
-
-@client.event(MessageEv)
-def on_message(client: NewClient, message: MessageEv):
-    global group_messages
-    
-    # 1. GET INFO
-    chat_id = message.Info.MessageSource.Chat
-    jid = chat_id.User
-    is_group = "g.us" in str(chat_id)
-    
-    # 2. GET TEXT
-    text = message.Message.conversation or message.Message.extendedTextMessage.text
-    
-    # 3. Store group messages
-    if is_group and text:
-        from datetime import datetime
-        timestamp = datetime.now().strftime("%I:%M %p")
-        sender_name = getattr(message.Info, "PushName", getattr(message.Info, "push_name", "Unknown"))
-        
-        if jid not in group_messages:
-            group_messages[jid] = []
-        
-        group_messages[jid].append({
-            "text": text,
-            "timestamp": timestamp,
-            "sender": sender_name
-        })
-        
-        # Keep only last 50 messages per group
-        if len(group_messages[jid]) > 50:
-            group_messages[jid] = group_messages[jid][-50:]
-    
-    # 4. LOG EVERYTHING (Show in Terminal so user can see ID and Message)
-    sender_name = getattr(message.Info, "PushName", getattr(message.Info, "push_name", "Unknown"))
-    type_str = "GROUP" if is_group else "USER"
-    
-    if text:
-        print(f"\n[{type_str} MSG] From: {sender_name} | ID: {jid}")
-        print(f"   Message: {text}")
-    else:
-        print(f"\n[{type_str} MSG] From: {sender_name} | ID: {jid} | (Media/No Text)")
-
-    # 5. FILTER: WHITELIST (Applies to BOTH Users and Groups)
-    load_config()
-    allowed_set = {item["jid"] for item in config["allowed_jids"]}
-    
-    if str(jid) not in allowed_set:
-        print(f"   -> (Not Whitelisted - AI/Email Skipped)")
-        return
-
-    # 5. PROCESS ALLOWED MESSAGES
-    if text:
-        print(f"   -> [ALLOWED] Processing with AI...")
-        
-        # DEDUPLICATION CHECK
-        if is_duplicate(text):
-            print(f"   -> ♻️ Duplicate Message Ignored (Seen recently).")
-            return
-        
-        # AI ANALYSIS (Groq)
-        print("   -> Analyzing with Groq AI...")
-        roles, emails = analyze_with_groq(text)
-        
-        if roles or emails:
-            print(f"   -> AI Extracted: Roles={roles}, Emails={emails}")
-            # SEND EMAIL
-            send_email_alert(sender_name, text, roles, emails)
+        # --- AUTO-ALLOW & TIME CHECK ---
+        should_process = False
+        if config.get("auto_allow", False):
+            try:
+                # Fetch IST Time
+                ist_time_str = get_ist_time()
+                if ist_time_str:
+                    current_time = time.strptime(ist_time_str, "%H:%M")
+                    start_time = time.strptime(config.get("start_time", "09:00"), "%H:%M")
+                    end_time = time.strptime(config.get("end_time", "18:00"), "%H:%M")
+                    
+                    if start_time <= current_time <= end_time:
+                        should_process = True
+                    else:
+                        print(f"[User {user_id}] Message skipped: Outside allowed time window ({ist_time_str})")
+                else:
+                    print(f"[User {user_id}] Message skipped: Could not fetch IST time")
+            except Exception as e:
+                print(f"[User {user_id}] Time Check Error: {e}")
         else:
-            print("   -> AI could not extract details. Ignoring message (No Email Sent).")
+            print(f"[User {user_id}] Message skipped: Auto-Allow is OFF")
+
+        if should_process and str(jid) in allowed_jids and text:
+            print(f"[User {user_id}] Processing message from {jid}")
+            # ... (AI Logic would go here, simplified for now) ...
+            # We can re-add the full AI logic in the next step
+            
+    # Connect in a separate thread to not block
+    def run_client():
+        try:
+            client.connect()
+        except Exception as e:
+            print(f"[User {user_id}] Client Error: {e}")
+
+    thread = threading.Thread(target=run_client, daemon=True)
+    thread.start()
+    
+    active_clients[user_id] = client
 
 # --- FLASK ROUTES ---
+
 @app.route("/")
 def index():
-    load_config()
-    message = request.args.get("message")
-    status = request.args.get("status")
-    return render_template("index.html", config=config, message=message, status=status)
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+    
+    user_id = session["user_id"]
+    config = load_user_config(user_id)
+    
+    # Ensure bot is running
+    if user_id not in active_clients:
+        start_bot_for_user(user_id)
+        
+    return render_template("index.html", config=config, username=session.get("username"))
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        username = request.form.get("username")
+        password = request.form.get("password")
+        
+        user = get_user(username)
+        
+        if user:
+            # Handle both old schema (id, username, password) and new schema (id, username, email, password)
+            # Old schema has 3 columns, new schema has 4
+            password_hash = user[3] if len(user) > 3 else user[2]
+            
+            if check_password_hash(password_hash, password):
+                session["user_id"] = user[0]
+                session["username"] = user[1]
+                return redirect(url_for("index"))
+            else:
+                return render_template("login.html", error="Invalid credentials")
+        else:
+            return render_template("login.html", error="Invalid credentials")
+            
+    return render_template("login.html")
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "POST":
+        username = request.form.get("username")
+        email = request.form.get("email")
+        password = request.form.get("password")
+        confirm = request.form.get("confirm_password")
+        
+        if password != confirm:
+            return render_template("register.html", error="Passwords do not match")
+            
+        if create_user(username, email, password):
+            flash("Account created! Please login.")
+            return redirect(url_for("login"))
+        else:
+            return render_template("register.html", error="Username already exists")
+            
+    return render_template("register.html")
+
+@app.route("/forgot_password", methods=["GET", "POST"])
+def forgot_password():
+    if request.method == "POST":
+        email = request.form.get("email")
+        user = get_user_by_email(email)
+        
+        if user:
+            # In a real app, we would send an email. 
+            # Here we just store the user ID in session temporarily to allow reset.
+            session["reset_user_id"] = user[0]
+            return redirect(url_for("reset_password"))
+        else:
+            return render_template("forgot_password.html", error="Email not found")
+            
+    return render_template("forgot_password.html")
+
+@app.route("/reset_password", methods=["GET", "POST"])
+def reset_password():
+    if "reset_user_id" not in session:
+        return redirect(url_for("login"))
+        
+    if request.method == "POST":
+        password = request.form.get("password")
+        confirm = request.form.get("confirm_password")
+        
+        if password != confirm:
+            return render_template("reset_password.html", error="Passwords do not match")
+            
+        user_id = session["reset_user_id"]
+        update_password(user_id, password)
+        session.pop("reset_user_id", None) # Clear the reset session
+        
+        return render_template("login.html", message="Password updated successfully! Please login.")
+        
+    return render_template("reset_password.html")
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
 
 @app.route("/save", methods=["POST"])
 def save():
-    global config
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+        
+    user_id = session["user_id"]
+    config = load_user_config(user_id)
+    
     config["email_user"] = request.form.get("email_user")
     config["email_pass"] = request.form.get("email_pass")
     config["dest_email"] = request.form.get("dest_email")
     config["groq_api_key"] = request.form.get("groq_api_key")
     
-    # Handle Whitelist (JIDs and Names)
+    # Auto-Allow Settings
+    config["auto_allow"] = "auto_allow" in request.form
+    config["start_time"] = request.form.get("start_time")
+    config["end_time"] = request.form.get("end_time")
+    
+    # Handle Whitelist
     jids = request.form.getlist("jids")
     names = request.form.getlist("names")
-    
     new_whitelist = []
     for jid, name in zip(jids, names):
         if jid.strip():
             new_whitelist.append({"jid": jid.strip(), "name": name.strip()})
-            
     config["allowed_jids"] = new_whitelist
-    save_config()
     
+    save_user_config(user_id, config)
     return redirect(url_for("index", message="Configuration Saved!", status="success"))
 
 @app.route("/whatsapp")
 def whatsapp():
+    if "user_id" not in session:
+        return redirect(url_for("login"))
     return render_template("whatsapp.html")
 
 @app.route("/qr_status")
 def qr_status():
-    return jsonify(qr_data)
+    if "user_id" not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    user_id = session["user_id"]
+    # Ensure bot is started
+    if user_id not in active_clients:
+        start_bot_for_user(user_id)
+        
+    return jsonify(qr_data_store.get(user_id, {"code": None, "connected": False}))
 
 @app.route("/group_messages")
 def get_group_messages():
-    """Get all group messages with whitelist status"""
-    load_config()
+    if "user_id" not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+        
+    user_id = session["user_id"]
+    msgs = user_messages.get(user_id, {})
+    
+    config = load_user_config(user_id)
     allowed_jids = {item["jid"] for item in config.get("allowed_jids", [])}
     
-    # Prepare response with whitelist status (only last 3 messages)
     response = {}
-    for group_id, messages in group_messages.items():
+    for group_id, messages in msgs.items():
         response[group_id] = {
             "whitelisted": group_id in allowed_jids,
-            "messages": messages[-3:] if len(messages) > 3 else messages  # Only last 3
+            "messages": messages[-3:] if len(messages) > 3 else messages
         }
-    
     return jsonify(response)
 
 @app.route("/add_to_whitelist", methods=["POST"])
 def add_to_whitelist():
-    """Add a group to whitelist"""
+    if "user_id" not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+        
+    user_id = session["user_id"]
     data = request.json
     group_id = data.get("group_id")
     
-    if not group_id:
-        return jsonify({"success": False, "message": "No group_id provided"}), 400
-    
-    load_config()
-    
-    # Check if already whitelisted
+    config = load_user_config(user_id)
     allowed_jids = [str(item["jid"]) for item in config.get("allowed_jids", [])]
-    if str(group_id) not in allowed_jids:
-        if "allowed_jids" not in config:
-            config["allowed_jids"] = []
-        config["allowed_jids"].append({"jid": str(group_id), "name": f"Group {str(group_id)[:10]}"})
-        save_config()
-        print(f"Added {group_id} to whitelist")
-        return jsonify({"success": True, "message": "Added to whitelist"})
     
+    if str(group_id) not in allowed_jids:
+        config["allowed_jids"].append({"jid": str(group_id), "name": f"Group {str(group_id)[:10]}"})
+        save_user_config(user_id, config)
+        return jsonify({"success": True})
+        
     return jsonify({"success": False, "message": "Already whitelisted"})
 
 @app.route("/remove_from_whitelist", methods=["POST"])
 def remove_from_whitelist():
-    """Remove a group from whitelist"""
+    if "user_id" not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+        
+    user_id = session["user_id"]
     data = request.json
     group_id = data.get("group_id")
     
-    if not group_id:
-        return jsonify({"success": False, "message": "No group_id provided"}), 400
-    
-    load_config()
-    
-    # Remove from whitelist
+    config = load_user_config(user_id)
     config["allowed_jids"] = [item for item in config.get("allowed_jids", []) if str(item["jid"]) != str(group_id)]
-    save_config()
-    print(f"Removed {group_id} from whitelist")
+    save_user_config(user_id, config)
     
-    return jsonify({"success": True, "message": "Removed from whitelist"})
+    return jsonify({"success": True})
 
-@app.route("/logout", methods=["POST"])
-def logout():
-    global qr_data, client
-    
-    def reconnect_client():
-        """Function to handle reconnection in background"""
-        global client, qr_data
-        try:
-            print("Starting reconnection process...")
-            time.sleep(2)  # Wait for old connection to fully close
-            
-            # Delete the database file
-            if os.path.exists(COGNITIVE_DB_PATH):
-                max_attempts = 10
-                for attempt in range(max_attempts):
-                    try:
-                        os.remove(COGNITIVE_DB_PATH)
-                        print("✓ cognitive.db deleted successfully")
-                        break
-                    except Exception as e:
-                        if attempt < max_attempts - 1:
-                            time.sleep(0.5)
-                        else:
-                            print(f"Warning: Could not delete db file: {e}")
-            
-            # Create new client instance
-            print("Creating new client instance...")
-            client = NewClient(COGNITIVE_DB_PATH)
-            
-            # Register QR callback for new client
-            def handle_qr_code_new(client_obj, qr_code_string):
-                global qr_data
-                try:
-                    print(f"\n{'='*50}")
-                    print(f"NEW QR Code Received! Length: {len(qr_code_string)}")
-                    print(f"{'='*50}\n")
-                    
-                    qr = qrcode.QRCode(version=1, box_size=10, border=4)
-                    qr.add_data(qr_code_string)
-                    qr.make(fit=True)
-                    img = qr.make_image(fill_color="black", back_color="white")
-                    buffered = io.BytesIO()
-                    img.save(buffered, format="PNG")
-                    img_str = base64.b64encode(buffered.getvalue()).decode()
-                    qr_data["code"] = img_str
-                    qr_data["connected"] = False
-                    print("✓ New QR Code converted to base64 and stored!")
-                    print(f"✓ Visit http://localhost:5000/whatsapp to scan it!")
-                    print(f"{'='*50}\n")
-                except Exception as e:
-                    print(f"Error generating new QR: {e}")
-            
-            client.qr(handle_qr_code_new)
-            print("✓ New client QR callback registered")
-            
-            # Re-register event handlers
-            @client.event(ConnectedEv)
-            def on_connected_new(client: NewClient, event: ConnectedEv):
-                global qr_data
-                qr_data["connected"] = True
-                qr_data["code"] = None
-                print("✓ Connected to WhatsApp!")
-            
-            @client.event(MessageEv)
-            def on_message_new(client: NewClient, message: MessageEv):
-                # Reuse the original on_message logic
-                chat_id = message.Info.MessageSource.Chat
-                jid = chat_id.User
-                is_group = "g.us" in str(chat_id)
-                text = message.Message.conversation or message.Message.extendedTextMessage.text
-                sender_name = getattr(message.Info, "PushName", getattr(message.Info, "push_name", "Unknown"))
-                type_str = "GROUP" if is_group else "USER"
-                
-                if not text:
-                    print(f"[{type_str} MSG] From: {sender_name} | ID: {jid} | (Media/No Text)")
-                    return
-                
-                print(f"\n[{type_str} MSG] From: {sender_name} | ID: {jid}")
-                print(f"   Message: {text}")
-                
-                if is_duplicate(text):
-                    print("   -> [DUPLICATE] Skipping (seen recently).")
-                    return
-                
-                allowed_jids = [item["jid"] for item in config.get("allowed_jids", [])]
-                if not allowed_jids or jid not in allowed_jids:
-                    print("   -> (Not Whitelisted - AI/Email Skipped)")
-                    return
-                
-                print("   -> [ALLOWED] Processing with AI...")
-                
-                if not config.get("groq_api_key"):
-                    print("   -> No Groq API Key set. Skipping AI analysis.")
-                    return
-                
-                roles, emails = analyze_with_groq(text)
-                
-                if roles or emails:
-                    print(f"   -> AI Extracted: Roles={roles}, Emails={emails}")
-                    send_email_alert(sender_name, text, roles, emails)
-                else:
-                    print("   -> AI could not extract details. Ignoring message (No Email Sent).")
-            
-            # Connect the new client
-            print("Connecting to WhatsApp...")
-            client.connect()
-            
-        except Exception as e:
-            print(f"Reconnection error: {e}")
-            import traceback
-            traceback.print_exc()
-    
-    try:
-        print("\n" + "=" * 50)
-        print("LOGOUT INITIATED")
-        print("=" * 50)
-        
-        # Logout from WhatsApp
-        try:
-            client.logout()
-            print("✓ Client logged out from WhatsApp")
-        except Exception as e:
-            print(f"Note: {e}")
-        
-        # Reset QR data immediately
-        qr_data["code"] = None
-        qr_data["connected"] = False
-        
-        # Start reconnection in background thread
-        reconnect_thread = threading.Thread(target=reconnect_client, daemon=True)
-        reconnect_thread.start()
-        
-        print("✓ Reconnection started in background...")
-        print("=" * 50 + "\n")
-        
-        return jsonify({
-            "success": True, 
-            "message": "Logged out! New QR code will be generated automatically. Please wait..."
-        })
-    except Exception as e:
-        print(f"Logout error: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({"success": False, "message": str(e)}), 500
-
-def run_flask():
-    app.run(host="0.0.0.0", port=5000)
-
-# --- MAIN ENTRY POINT ---
+# --- MAIN ---
 if __name__ == "__main__":
-    # Load History
-    load_history()
-    
-    # Start Flask in a separate thread
-    flask_thread = threading.Thread(target=run_flask)
-    flask_thread.daemon = True # Daemon thread exits when main program exits
-    flask_thread.start()
-    
-    print("---------------------------------------------------")
-    print("Web Configuration UI running at: http://localhost:5000")
-    print("---------------------------------------------------")
-    print("Waiting for QR Scan...")
-    
-    # AUTO-OPEN BROWSER
-    try:
-        webbrowser.open("http://localhost:5000")
-    except:
-        pass
-    
-    # Start WhatsApp Client (Main Thread)
-    client.connect()
+    init_db()
+    print("Multi-User WhatsApp Manager Running...")
+    app.run(host="0.0.0.0", port=5000, debug=True)
