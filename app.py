@@ -381,34 +381,6 @@ def get_recent_messages(user_id):
                 })
                 
     except Exception as e:
-        print(f"DB Error (get_recent): {e}")
-    finally:
-        if conn:
-            conn.close()
-    return groups
-
-# --- WHATSAPP CLIENT MANAGEMENT ---
-def get_user_db_path(user_id):
-    return os.path.join(USER_DATA_FOLDER, f"whatsapp_session_{user_id}.db")
-
-def start_bot_for_user(user_id):
-    def on_logout(client, event):
-        print(f"[User {user_id}] Logged Out!")
-        qr_data_store[user_id] = {"code": None, "connected": False}
-        # Stop the client? For now, we let it run so it can generate new QR
-
-    @client.event(MessageEv)
-    def on_message(client, message):
-        # 1. GET INFO
-        chat_id = message.Info.MessageSource.Chat
-        jid = chat_id.User
-        is_group = "g.us" in str(chat_id)
-        text = message.Message.conversation or message.Message.extendedTextMessage.text
-        
-        # 2. Store Group Messages (IN NEON)
-        if is_group and text:
-            timestamp = time.strftime("%I:%M %p")
-            sender_name = getattr(message.Info, "PushName", getattr(message.Info, "push_name", "Unknown"))
             
             # Check for duplicates BEFORE saving
             is_dup = is_duplicate_message(user_id, text)
