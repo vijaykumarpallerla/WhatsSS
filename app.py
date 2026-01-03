@@ -392,33 +392,6 @@ def get_user_db_path(user_id):
     return os.path.join(USER_DATA_FOLDER, f"whatsapp_session_{user_id}.db")
 
 def start_bot_for_user(user_id):
-    if user_id in active_clients:
-        return # Already running
-
-    db_path = get_user_db_path(user_id)
-    
-    # Callback for QR Code
-    def on_qr(client, data):
-        # Store QR code in memory for the frontend to poll
-        qr_data_store[user_id] = {
-            "code": base64.b64encode(data).decode('utf-8'),
-            "connected": False
-        }
-        print(f"[User {user_id}] New QR Code Generated")
-
-    # Client Setup
-    client = NewClient(db_path, qrCallback=on_qr)
-    
-    @client.event(ConnectedEv)
-    def on_connect(client, event):
-        print(f"[User {user_id}] Connected to WhatsApp!")
-        qr_data_store[user_id] = {"code": None, "connected": True}
-
-    @client.event(PairStatusEv)
-    def on_pair_status(client, event):
-        print(f"[User {user_id}] Pair Status: {event}")
-
-    @client.event(LoggedOutEv)
     def on_logout(client, event):
         print(f"[User {user_id}] Logged Out!")
         qr_data_store[user_id] = {"code": None, "connected": False}
