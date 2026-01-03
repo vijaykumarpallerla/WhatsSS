@@ -1,6 +1,6 @@
 flask
 psycopg2-binary
-neonize
+neonize==0.3.12
 groq
 qrcode
 pillow
