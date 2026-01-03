@@ -17,7 +17,7 @@ from pathlib import Path
 from flask import Flask, render_template, request, redirect, url_for, jsonify, session, flash
 from werkzeug.security import generate_password_hash, check_password_hash
 from neonize.client import NewClient
-from neonize.events import ConnectedEv, MessageEv, PairStatusEv
+from neonize.events import ConnectedEv, MessageEv, PairStatusEv, LoggedOutEv
 from neonize.types import MessageServerID
 from neonize.utils import log
 from datetime import timedelta
@@ -234,6 +234,26 @@ def start_bot_for_user(user_id):
         qr_data_store[user_id]["connected"] = True
         qr_data_store[user_id]["code"] = None
 
+    @client.event(LoggedOutEv)
+    def on_logged_out(client, event):
+        print(f"[User {user_id}] Logged Out via Phone!")
+        
+        # 1. Delete session file
+        if os.path.exists(db_path):
+            try:
+                client.disconnect() # Ensure it's closed
+                os.remove(db_path)
+                print(f"[User {user_id}] Session file deleted.")
+            except Exception as e:
+                print(f"[User {user_id}] Error cleaning up: {e}")
+        
+        # 2. Reset store
+        qr_data_store[user_id] = {"code": None, "connected": False}
+        
+        # 3. Remove from active clients so it restarts on next poll
+        if user_id in active_clients:
+            del active_clients[user_id]
+
     @client.event(MessageEv)
     def on_message(client, message):
         # 1. GET INFO
@@ -288,7 +308,6 @@ def start_bot_for_user(user_id):
         if should_process and str(jid) in allowed_jids and text:
             print(f"[User {user_id}] Processing message from {jid}")
             # ... (AI Logic would go here, simplified for now) ...
-            # We can re-add the full AI logic in the next step
             
     # Connect in a separate thread to not block
     def run_client():
@@ -328,7 +347,6 @@ def login():
         
         if user:
             # Handle both old schema (id, username, password) and new schema (id, username, email, password)
-            # Old schema has 3 columns, new schema has 4
             password_hash = user[3] if len(user) > 3 else user[2]
             
             if check_password_hash(password_hash, password):
@@ -368,8 +386,6 @@ def forgot_password():
         user = get_user_by_email(email)
         
         if user:
-            # In a real app, we would send an email. 
-            # Here we just store the user ID in session temporarily to allow reset.
             session["reset_user_id"] = user[0]
             return redirect(url_for("reset_password"))
         else:
@@ -501,6 +517,36 @@ def remove_from_whitelist():
     config["allowed_jids"] = [item for item in config.get("allowed_jids", []) if str(item["jid"]) != str(group_id)]
     save_user_config(user_id, config)
     
+    return jsonify({"success": True})
+
+@app.route("/disconnect_whatsapp", methods=["POST"])
+def disconnect_whatsapp():
+    if "user_id" not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+        
+    user_id = session["user_id"]
+    
+    # 1. Stop the client if running
+    if user_id in active_clients:
+        try:
+            active_clients[user_id].disconnect()
+        except:
+            pass
+        del active_clients[user_id]
+        
+    # 2. Clear QR Data
+    if user_id in qr_data_store:
+        del qr_data_store[user_id]
+        
+    # 3. Delete Session File (Force new QR)
+    db_path = get_user_db_path(user_id)
+    if os.path.exists(db_path):
+        try:
+            os.remove(db_path)
+            print(f"[User {user_id}] Session file deleted for fresh login.")
+        except Exception as e:
+            print(f"[User {user_id}] Error deleting session file: {e}")
+            
     return jsonify({"success": True})
 
 # --- MAIN ---

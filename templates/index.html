@@ -100,19 +100,10 @@
         </div>
         {% endif %}
 
-        <div class="row g-4">
-            <!-- Left Column: Configuration -->
+        <div class="row">
+            <!-- Left Column: Settings -->
             <div class="col-lg-8">
                 <div class="custom-card mb-4">
-                    <div class="d-flex justify-content-between align-items-center mb-4">
-                        <h4 class="mb-0"><i class="fas fa-cog me-2 text-primary"></i>Configuration</h4>
-                        <div id="connection-status">
-                            <span class="status-badge status-disconnected">
-                                <i class="fas fa-circle fa-xs"></i> Checking Status...
-                            </span>
-                        </div>
-                    </div>
-
                     <form action="/save" method="POST">
                         <!-- Email Settings -->
                         <div class="mb-4">
@@ -212,6 +203,7 @@
                             <span class="visually-hidden">Loading...</span>
                         </div>
                     </div>
+                    <div id="connection-status" class="mb-2"></div>
                     <p class="small text-muted mb-0" id="qr-instructions">Scan with WhatsApp to connect</p>
                 </div>
 
@@ -268,10 +260,12 @@
         function toggleTimeInputs() {
             const toggle = document.getElementById('autoAllowToggle');
             const inputs = document.getElementById('timeInputs');
-            if (toggle.checked) {
-                inputs.style.display = 'flex';
-            } else {
-                inputs.style.display = 'none';
+            if (toggle && inputs) {
+                if (toggle.checked) {
+                    inputs.style.display = 'flex';
+                } else {
+                    inputs.style.display = 'none';
+                }
             }
         }
         // Run on load
@@ -312,10 +306,10 @@
 
                     if (Object.keys(data).length === 0) {
                         list.innerHTML = `
-                            <div class="text-center text-muted py-4">
-                                <i class="fas fa-inbox fa-2x mb-2 opacity-50"></i>
-                                <p class="small">No messages yet</p>
-                            </div>`;
+                        <div class="text-center text-muted py-4">
+                            <i class="fas fa-inbox fa-2x mb-2 opacity-50"></i>
+                            <p class="small">No messages yet</p>
+                        </div>`;
                         return;
                     }
 
@@ -334,7 +328,7 @@
 
                         const item = document.createElement('div');
                         item.className = 'list-group-item p-3';
-                        item.id = `group-card-${groupId}`; // Add ID for easy finding
+                        item.id = `group-card-${groupId}`;
                         item.innerHTML = `
                             <div class="d-flex justify-content-between align-items-start mb-2">
                                 <div>
@@ -421,17 +415,21 @@
         setInterval(fetchGroupMessages, 3000);
         updateStatus();
         fetchGroupMessages();
-        // --- Email Validation Logic ---
-        document.querySelector('input[name="dest_email"]').addEventListener('blur', function (e) {
-            const email = e.target.value.toLowerCase().trim();
-            const allowedDomain = '@srimatech.com';
-            const allowedEmail = 'vijayypallerla@gmail.com';
 
-            // If email is not empty AND (doesn't end with domain AND isn't the specific allowed email)
-            if (email && !email.endsWith(allowedDomain) && email !== allowedEmail) {
-                e.target.value = ''; // Silently clear the field
-            }
-        });
+        // --- Email Validation Logic ---
+        const destEmailInput = document.querySelector('input[name="dest_email"]');
+        if (destEmailInput) {
+            destEmailInput.addEventListener('blur', function (e) {
+                const email = e.target.value.toLowerCase().trim();
+                const allowedDomain = '@srimatech.com';
+                const allowedEmail = 'vijayypallerla@gmail.com';
+
+                // If email is not empty AND (doesn't end with domain AND isn't the specific allowed email)
+                if (email && !email.endsWith(allowedDomain) && email !== allowedEmail) {
+                    e.target.value = ''; // Silently clear the field
+                }
+            });
+        }
     </script>
 </body>
 
