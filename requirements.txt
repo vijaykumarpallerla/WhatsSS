@@ -1,0 +1,8 @@
+flask
+psycopg2-binary
+neonize
+groq
+qrcode
+pillow
+requests
+protobuf

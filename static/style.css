@@ -83,7 +83,12 @@ body {
 }
 
 /* Typography */
-h1, h2, h3, h4, h5, h6 {
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
     color: var(--text-color);
     font-weight: 600;
 }
@@ -144,4 +149,54 @@ h1, h2, h3, h4, h5, h6 {
     margin: 0 auto 1rem;
     color: white;
     font-size: 28px;
+}
+
+/* Floating Stats Widget */
+#stats-widget {
+    position: fixed;
+    top: 100px;
+    right: 20px;
+    width: 250px;
+    background: white;
+    border-radius: 12px;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.2);
+    z-index: 9999;
+    cursor: move;
+    overflow: hidden;
+    border: 2px solid var(--primary-color);
+    transition: box-shadow 0.2s;
+}
+
+.stats-header {
+    background: var(--primary-color);
+    color: white;
+    padding: 12px 16px;
+    font-weight: 600;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    user-select: none;
+}
+
+.stats-body {
+    padding: 16px;
+}
+
+.stat-item {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 12px;
+    font-size: 14px;
+    color: var(--text-secondary);
+}
+
+.stat-item:last-child {
+    margin-bottom: 0;
+}
+
+.stat-value {
+    font-weight: 700;
+    color: var(--text-color);
+    font-size: 16px;
 }

@@ -27,7 +27,7 @@
             </div>
             {% endif %}
 
-            <form method="POST" action="/register">
+            <form method="POST" action="/register" onkeydown="return event.key != 'Enter';">
                 <div class="mb-3">
                     <label class="form-label">Username</label>
                     <div class="input-group">

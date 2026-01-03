@@ -7,7 +7,7 @@
     <title>WhatsApp Bot Manager</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    <link href="{{ url_for('static', filename='style.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='style.css') }}?v=3" rel="stylesheet">
     <style>
         /* Dashboard Specific Styles */
         .navbar {
@@ -83,6 +83,21 @@
             <a href="#" class="nav-brand">
                 <i class="fab fa-whatsapp fa-lg"></i> Bot Manager
             </a>
+
+            <!-- Stats in Navbar -->
+            <div class="d-flex align-items-center gap-4 mx-auto">
+                <div class="d-flex align-items-center gap-2"
+                    style="background: #f0f2f5; padding: 6px 16px; border-radius: 20px;">
+                    <span class="text-muted small fw-bold">TODAY</span>
+                    <span class="badge bg-success rounded-pill" id="today-count" style="font-size: 0.9rem;">0</span>
+                </div>
+                <div class="d-flex align-items-center gap-2"
+                    style="background: #f0f2f5; padding: 6px 16px; border-radius: 20px;">
+                    <span class="text-muted small fw-bold">TOTAL</span>
+                    <span class="badge bg-primary rounded-pill" id="total-count" style="font-size: 0.9rem;">0</span>
+                </div>
+            </div>
+
             <div class="d-flex align-items-center gap-3">
                 <span class="text-muted small fw-bold"><i class="fas fa-user-circle me-1"></i> {{ username }}</span>
                 <a href="/logout" class="btn btn-outline-danger btn-sm rounded-pill px-3">
@@ -104,25 +119,26 @@
             <!-- Left Column: Settings -->
             <div class="col-lg-8">
                 <div class="custom-card mb-4">
-                    <form action="/save" method="POST">
+                    <form action="/save" method="POST" onkeydown="return event.key != 'Enter';">
                         <!-- Email Settings -->
                         <div class="mb-4">
                             <div class="section-title"><i class="fas fa-envelope"></i> Email Settings</div>
                             <div class="row g-3">
                                 <div class="col-md-6">
-                                    <label class="form-label">Gmail Address</label>
+                                    <label class="form-label">Gmail Address <span class="text-danger">*</span></label>
                                     <input type="email" class="form-control" name="email_user"
-                                        value="{{ config.email_user }}" placeholder="your-email@gmail.com">
+                                        value="{{ config.email_user }}" placeholder="your-email@gmail.com" required>
                                 </div>
                                 <div class="col-md-6">
-                                    <label class="form-label">App Password</label>
+                                    <label class="form-label">App Password <span class="text-danger">*</span></label>
                                     <input type="password" class="form-control" name="email_pass"
-                                        value="{{ config.email_pass }}" placeholder="xxxx xxxx xxxx xxxx">
+                                        value="{{ config.email_pass }}" placeholder="xxxx xxxx xxxx xxxx" required>
                                 </div>
                                 <div class="col-12">
-                                    <label class="form-label">Destination Email</label>
+                                    <label class="form-label">Destination Email <span
+                                            class="text-danger">*</span></label>
                                     <input type="email" class="form-control" name="dest_email"
-                                        value="{{ config.dest_email }}" placeholder="manager@company.com">
+                                        value="{{ config.dest_email }}" placeholder="manager@company.com" required>
                                 </div>
                             </div>
                         </div>
@@ -130,11 +146,11 @@
                         <!-- AI Settings -->
                         <div class="mb-4">
                             <div class="section-title"><i class="fas fa-robot"></i> AI Settings</div>
-                            <label class="form-label">Groq API Key</label>
+                            <label class="form-label">Groq API Key <span class="text-danger">*</span></label>
                             <div class="input-group">
                                 <span class="input-group-text bg-light"><i class="fas fa-key text-muted"></i></span>
                                 <input type="password" class="form-control" name="groq_api_key"
-                                    value="{{ config.groq_api_key }}" placeholder="gsk_...">
+                                    value="{{ config.groq_api_key }}" placeholder="gsk_..." required>
                             </div>
                         </div>
 
@@ -204,7 +220,8 @@
                         </div>
                     </div>
                     <div id="connection-status" class="mb-2"></div>
-                    <p class="small text-muted mb-0" id="qr-instructions">Scan with WhatsApp to connect</p>
+                    <p class="small text-muted mb-0" id="qr-instructions">Scan with WhatsApp to
+                        connect</p>
                 </div>
 
                 <!-- Live Groups Feed -->
@@ -233,7 +250,8 @@
                 <div class="modal-header">
                     <div class="d-flex flex-column w-100">
                         <div class="d-flex justify-content-between align-items-center">
-                            <h5 class="modal-title text-truncate pe-2" id="modalTitle">Message Details</h5>
+                            <h5 class="modal-title text-truncate pe-2" id="modalTitle">Message
+                                Details</h5>
                             <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                         </div>
                         <div id="modalActions" class="mt-2">
@@ -430,6 +448,23 @@
                 }
             });
         }
+
+        // --- Stats Logic (Navbar) ---
+        function updateStats() {
+            fetch('/stats')
+                .then(response => {
+                    if (response.ok) return response.json();
+                    throw new Error('Network response was not ok');
+                })
+                .then(data => {
+                    document.getElementById('today-count').innerText = data.today;
+                    document.getElementById('total-count').innerText = data.total;
+                })
+                .catch(err => console.log("Stats Error:", err));
+        }
+
+        setInterval(updateStats, 5000); // Update every 5 seconds
+        updateStats();
     </script>
 </body>
 
