@@ -18,7 +18,7 @@ from pathlib import Path
 from flask import Flask, render_template, request, redirect, url_for, jsonify, session, flash
 from werkzeug.security import generate_password_hash, check_password_hash
 from neonize.client import NewClient
-from neonize.events import ConnectedEv, MessageEv, PairStatusEv, LoggedOutEv
+from neonize.events import ConnectedEv, MessageEv, PairStatusEv, LoggedOutEv, QREv
 from neonize.types import MessageServerID
 from neonize.utils import log
 from datetime import timedelta
@@ -397,18 +397,25 @@ def start_bot_for_user(user_id):
 
     db_path = get_user_db_path(user_id)
     
-    # Callback for QR Code
-    def on_qr(client, data):
-        # Store QR code in memory for the frontend to poll
-        qr_data_store[user_id] = {
-            "code": base64.b64encode(data).decode('utf-8'),
-            "connected": False
-        }
-        print(f"[User {user_id}] New QR Code Generated")
-
     # Client Setup
     client = NewClient(db_path)
-    client.qrCallback = on_qr
+
+    # Callback for QR Code
+    @client.event(QREv)
+    def on_qr(client, event: QREv):
+        try:
+            if hasattr(event, "codes"):
+                code_bytes = event.codes[0]
+                qr_base64 = base64.b64encode(code_bytes).decode('utf-8')
+                qr_data_store[user_id] = {
+                    "code": qr_base64,
+                    "connected": False
+                }
+                print(f"[User {user_id}] New QR Code Generated (captured via event)")
+            else:
+                print(f"[User {user_id}] QR Event received but no 'codes': {event}")
+        except Exception as e:
+             print(f"[User {user_id}] Error processing QR event: {e}")
     
     @client.event(ConnectedEv)
     def on_connect(client, event):
