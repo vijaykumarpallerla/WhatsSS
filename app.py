@@ -140,13 +140,15 @@ def analyze_message(api_key, text):
         if match:
             json_str = match.group(0)
             return json.loads(json_str)
-            
+
     except Exception as e:
         print(f"AI Error: {e}", flush=True)
         
     return {"is_usa_hiring": False, "role": "Unknown", "email": None}
 
 # --- FLASK APP SETUP ---
+app = Flask(__name__)
+app.secret_key = "super_secret_key_change_this_in_production"
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 
 # --- DATA STORAGE PATHS ---
