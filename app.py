@@ -67,13 +67,14 @@ def send_email(config, subject, body, reply_to=None):
         if reply_to:
             msg.add_header('Reply-To', reply_to)
 
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+        with smtplib.SMTP('smtp.gmail.com', 587) as server:
+            server.starttls()
             server.login(sender_email, sender_pass)
             server.sendmail(sender_email, dest_email, msg.as_string())
-        print(f"Email sent to {dest_email}")
+        print(f"Email sent to {dest_email}", flush=True)
         return True
     except Exception as e:
-        print(f"Email Error: {e}")
+        print(f"Email Error: {e}", flush=True)
         return False
 
 def analyze_message(api_key, text):
@@ -507,13 +508,13 @@ def start_bot_for_user(user_id):
                     print(f"[User {user_id}] Skipping AI Alert: Duplicate Message.")
                     return
 
-                print(f"[User {user_id}] Processing message from {jid}")
+                print(f"[User {user_id}] Processing message from {jid}", flush=True)
                 
                 api_key = config.get("groq_api_key")
                 if api_key:
                     result = analyze_message(api_key, text)
                     if result.get("is_usa_hiring"):
-                        print(f"[User {user_id}] AI Match: YES. Sending email...")
+                        print(f"[User {user_id}] AI Match: YES. Sending email...", flush=True)
                         
                         role = result.get("role", "Unknown Role")
                         extracted_email = result.get("email")
@@ -526,10 +527,10 @@ def start_bot_for_user(user_id):
                             content_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
                             mark_email_sent(user_id, content_hash)
                         else:
-                            print(f"[User {user_id}] Email failed to send. Not marking as sent.")
+                            print(f"[User {user_id}] Email failed to send. Not marking as sent.", flush=True)
                         
                     else:
-                        print(f"[User {user_id}] AI Match: NO")
+                        print(f"[User {user_id}] AI Match: NO", flush=True)
                 else:
                     print(f"[User {user_id}] No API Key configured.")
 
