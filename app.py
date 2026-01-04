@@ -390,33 +390,38 @@ def get_recent_messages(user_id):
 # --- WHATSAPP CLIENT MANAGEMENT ---
 def get_user_db_path(user_id):
     return os.path.join(USER_DATA_FOLDER, f"whatsapp_session_{user_id}.db")
-
 def start_bot_for_user(user_id):
     if user_id in active_clients:
         return # Already running
 
     db_path = get_user_db_path(user_id)
-    
+
     # Client Setup
     client = NewClient(db_path)
 
     # Callback for QR Code
-    @client.event(QREv)
-    def on_qr(client, event: QREv):
+    @client.qr
+    def on_qr(client, code_bytes: bytes):
         try:
-            if hasattr(event, "codes"):
-                code_bytes = event.codes[0]
-                qr_base64 = base64.b64encode(code_bytes).decode('utf-8')
-                qr_data_store[user_id] = {
-                    "code": qr_base64,
-                    "connected": False
-                }
-                print(f"[User {user_id}] New QR Code Generated (captured via event)")
-            else:
-                print(f"[User {user_id}] QR Event received but no 'codes': {event}")
+            # Generate QR Image from bytes
+            qr = qrcode.QRCode()
+            qr.add_data(code_bytes)
+            qr.make(fit=True)
+            
+            img = qr.make_image(fill_color="black", back_color="white")
+            
+            buffered = io.BytesIO()
+            img.save(buffered, format="PNG")
+            qr_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+
+            qr_data_store[user_id] = {
+                "code": qr_base64,
+                "connected": False
+            }
+            print(f"[User {user_id}] New QR Code Generated (captured via callback)")
         except Exception as e:
-             print(f"[User {user_id}] Error processing QR event: {e}")
-    
+             print(f"[User {user_id}] Error processing QR callback: {e}")
+
     @client.event(ConnectedEv)
     def on_connect(client, event):
         print(f"[User {user_id}] Connected to WhatsApp!")
@@ -428,9 +433,27 @@ def start_bot_for_user(user_id):
 
     @client.event(LoggedOutEv)
     def on_logout(client, event):
-        print(f"[User {user_id}] Logged Out!")
+        print(f"[User {user_id}] Logged Out! Cleaning up session...")
         qr_data_store[user_id] = {"code": None, "connected": False}
-        # Stop the client? For now, we let it run so it can generate new QR
+        
+        # 1. Remove from active clients
+        if user_id in active_clients:
+            del active_clients[user_id]
+            
+        # 2. Try to disconnect and delete file
+        try:
+            # Attempt to disconnect to release file lock
+            if hasattr(client, 'disconnect'):
+                client.disconnect()
+            
+            # Wait a moment for file release
+            time.sleep(1)
+            
+            if os.path.exists(db_path):
+                os.remove(db_path)
+                print(f"[User {user_id}] Session file deleted successfully.")
+        except Exception as e:
+            print(f"[User {user_id}] Error during logout cleanup: {e}")
 
     @client.event(MessageEv)
     def on_message(client, message):
