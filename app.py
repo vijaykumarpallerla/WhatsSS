@@ -22,6 +22,7 @@ from neonize.events import ConnectedEv, MessageEv, PairStatusEv, LoggedOutEv, QR
 from neonize.types import MessageServerID
 from neonize.utils import log
 from datetime import timedelta
+import socket
 import smtplib
 from email.mime.text import MIMEText
 from groq import Groq
@@ -61,25 +62,6 @@ def send_email(config, subject, body, reply_to=None):
 
         msg = MIMEText(body)
         msg['Subject'] = subject
-        msg['From'] = sender_email
-        msg['To'] = dest_email
-        
-        if reply_to:
-            msg.add_header('Reply-To', reply_to)
-
-        with smtplib.SMTP('smtp.gmail.com', 587) as server:
-            server.starttls()
-            server.login(sender_email, sender_pass)
-            server.sendmail(sender_email, dest_email, msg.as_string())
-        print(f"Email sent to {dest_email}", flush=True)
-        return True
-    except Exception as e:
-        print(f"Email Error: {e}", flush=True)
-        return False
-
-def analyze_message(api_key, text):
-    try:
-        client = Groq(api_key=api_key)
         prompt = f"""
         Analyze the following LinkedIn post text to determine if it is a valid USA Job Opening.
 
