@@ -57,7 +57,7 @@ def send_email(config, subject, body, reply_to=None):
 
         if not sender_email or not sender_pass or not dest_email:
             print("Email configuration missing.")
-            return
+            return False
 
         msg = MIMEText(body)
         msg['Subject'] = subject
@@ -71,8 +71,10 @@ def send_email(config, subject, body, reply_to=None):
             server.login(sender_email, sender_pass)
             server.sendmail(sender_email, dest_email, msg.as_string())
         print(f"Email sent to {dest_email}")
+        return True
     except Exception as e:
         print(f"Email Error: {e}")
+        return False
 
 def analyze_message(api_key, text):
     try:
@@ -519,11 +521,12 @@ def start_bot_for_user(user_id):
                         subject = f"Whatsapp Alert New job Found : {role}"
                         body = f"Sender: {sender_name}\nGroup: {jid}\n\nRole: {role}\nEmail: {extracted_email}\n\nMessage:\n{text}"
                         
-                        send_email(config, subject, body, reply_to=extracted_email)
-                        
-                        # Mark as sent in DB
-                        content_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
-                        mark_email_sent(user_id, content_hash)
+                        if send_email(config, subject, body, reply_to=extracted_email):
+                            # Mark as sent in DB ONLY if email success
+                            content_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
+                            mark_email_sent(user_id, content_hash)
+                        else:
+                            print(f"[User {user_id}] Email failed to send. Not marking as sent.")
                         
                     else:
                         print(f"[User {user_id}] AI Match: NO")
