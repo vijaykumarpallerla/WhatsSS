@@ -62,6 +62,34 @@ def send_email(config, subject, body, reply_to=None):
 
         msg = MIMEText(body)
         msg['Subject'] = subject
+        msg['From'] = sender_email
+        msg['To'] = dest_email
+        
+        if reply_to:
+            msg.add_header('Reply-To', reply_to)
+
+        # Force IPv4 Resolution for Render
+        gmail_host = 'smtp.gmail.com'
+        try:
+            gmail_ip = socket.gethostbyname(gmail_host)
+            print(f"Resolved {gmail_host} to {gmail_ip}", flush=True)
+        except Exception as e:
+            print(f"DNS Error: {e}", flush=True)
+            gmail_ip = gmail_host # Fallback
+
+        with smtplib.SMTP(gmail_ip, 587) as server:
+            server.starttls()
+            server.login(sender_email, sender_pass)
+            server.sendmail(sender_email, dest_email, msg.as_string())
+        print(f"Email sent to {dest_email}", flush=True)
+        return True
+    except Exception as e:
+        print(f"Email Error: {e}", flush=True)
+        return False
+
+def analyze_message(api_key, text):
+    try:
+        client = Groq(api_key=api_key)
         prompt = f"""
         Analyze the following LinkedIn post text to determine if it is a valid USA Job Opening.
 
@@ -114,13 +142,11 @@ def send_email(config, subject, body, reply_to=None):
             return json.loads(json_str)
             
     except Exception as e:
-        print(f"AI Error: {e}")
+        print(f"AI Error: {e}", flush=True)
         
     return {"is_usa_hiring": False, "role": "Unknown", "email": None}
 
 # --- FLASK APP SETUP ---
-app = Flask(__name__)
-app.secret_key = "super_secret_key_change_this_in_production"
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 
 # --- DATA STORAGE PATHS ---
