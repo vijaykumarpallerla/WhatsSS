@@ -1,9 +1,3 @@
-from gevent import monkey; monkey.patch_all()
-import sys
-import logging
-import json
-import threading
-import re
 import hashlib
 import time
 import uuid
