@@ -296,6 +296,7 @@
                     const instructions = document.getElementById('qr-instructions');
                     const connectBtn = document.getElementById('connect-btn');
 
+                    // Connected state
                     if (data.connected) {
                         qrContainer.innerHTML = '<i class="fas fa-check-circle text-success fa-4x mb-2"></i>';
                         statusBadge.innerHTML = '<span class="status-badge status-connected"><i class="fas fa-circle fa-xs"></i> Connected</span>';
@@ -306,25 +307,49 @@
                             connectBtn.classList.remove('btn-success');
                             connectBtn.classList.add('btn-secondary');
                         }
-                    } else if (data.code) {
+
+                        return;
+                    }
+
+                    // Prefer a file URL (shared store / disk)
+                    if (data.file_url) {
+                        qrContainer.innerHTML = `<img src="${data.file_url}" class="img-fluid" style="max-width: 200px">`;
+                        statusBadge.innerHTML = '<span class="status-badge status-disconnected"><i class="fas fa-circle fa-xs"></i> Disconnected</span>';
+                        instructions.textContent = 'Open WhatsApp > Linked Devices > Link a Device';
+                        if (connectBtn) {
+                            connectBtn.disabled = true;
+                            connectBtn.innerHTML = 'Scan QR';
+                            connectBtn.classList.remove('btn-success');
+                            connectBtn.classList.add('btn-secondary');
+                        }
+
+                        return;
+                    }
+
+                    // Fallback to inline base64 code
+                    if (data.code) {
                         qrContainer.innerHTML = `<img src="data:image/png;base64,${data.code}" class="img-fluid" style="max-width: 200px">`;
                         statusBadge.innerHTML = '<span class="status-badge status-disconnected"><i class="fas fa-circle fa-xs"></i> Disconnected</span>';
                         instructions.textContent = 'Open WhatsApp > Linked Devices > Link a Device';
                         if (connectBtn) {
                             connectBtn.disabled = true;
                             connectBtn.innerHTML = 'Scan QR';
+                            connectBtn.classList.remove('btn-success');
+                            connectBtn.classList.add('btn-secondary');
                         }
-                    } else {
-                        // No client started yet
-                        qrContainer.innerHTML = '<div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div>';
-                        statusBadge.innerHTML = '';
-                        instructions.textContent = 'Scan with WhatsApp to connect';
-                        if (connectBtn) {
-                            connectBtn.disabled = false;
-                            connectBtn.innerHTML = 'Connect WhatsApp';
-                            connectBtn.classList.remove('btn-secondary');
-                            connectBtn.classList.add('btn-success');
-                        }
+
+                        return;
+                    }
+
+                    // No QR available yet
+                    qrContainer.innerHTML = '<div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div>';
+                    statusBadge.innerHTML = '';
+                    instructions.textContent = 'Scan with WhatsApp to connect';
+                    if (connectBtn) {
+                        connectBtn.disabled = false;
+                        connectBtn.innerHTML = 'Connect WhatsApp';
+                        connectBtn.classList.remove('btn-secondary');
+                        connectBtn.classList.add('btn-success');
                     }
                 })
                 .catch(err => console.error("Status Error:", err));
@@ -454,28 +479,10 @@
                         console.error('QR Stream error:', data.error);
                         return;
                     }
-                    // Reuse updateStatus UI logic by feeding the fetched data
-                    const qrContainer = document.getElementById('qr-container');
-                    const statusBadge = document.getElementById('connection-status');
-                    const instructions = document.getElementById('qr-instructions');
-                    const connectBtn = document.getElementById('connect-btn');
-
-                    if (data.connected) {
-                        qrContainer.innerHTML = '<i class="fas fa-check-circle text-success fa-4x mb-2"></i>';
-                        statusBadge.innerHTML = '<span class="status-badge status-connected"><i class="fas fa-circle fa-xs"></i> Connected</span>';
-                        instructions.textContent = 'Bot is active and running';
-                        if (connectBtn) { connectBtn.disabled = true; connectBtn.innerHTML = 'Connected'; connectBtn.classList.remove('btn-success'); connectBtn.classList.add('btn-secondary'); }
-                    } else if (data.code) {
-                        qrContainer.innerHTML = `<img src="data:image/png;base64,${data.code}" class="img-fluid" style="max-width: 200px">`;
-                        statusBadge.innerHTML = '<span class="status-badge status-disconnected"><i class="fas fa-circle fa-xs"></i> Disconnected</span>';
-                        instructions.textContent = 'Open WhatsApp > Linked Devices > Link a Device';
-                        if (connectBtn) { connectBtn.disabled = true; connectBtn.innerHTML = 'Scan QR'; }
-                    } else {
-                        qrContainer.innerHTML = '<div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div>';
-                        statusBadge.innerHTML = '';
-                        instructions.textContent = 'Scan with WhatsApp to connect';
-                        if (connectBtn) { connectBtn.disabled = false; connectBtn.innerHTML = 'Connect WhatsApp'; connectBtn.classList.remove('btn-secondary'); connectBtn.classList.add('btn-success'); }
-                    }
+                    // Use the canonical updateStatus() fetch which computes `file_url`
+                    // This ensures the dashboard receives the same `file_url` the
+                    // server exposes via `/qr_status` and updates automatically.
+                    updateStatus();
                 } catch (err) { console.error('SSE parse error', err); }
             };
             es.onerror = function (e) {
@@ -503,7 +510,12 @@
             btn.innerHTML = 'Starting...';
             try {
                 // Trigger server route that starts the client thread
-                const r = await fetch('/connect_whatsapp');
+                const r = await fetch('/connect_whatsapp', { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+                if (r.status === 401) {
+                    // Not authenticated — redirect to login for a user-friendly flow
+                    window.location.href = '/login';
+                    return;
+                }
                 // keep polling status; UI will update when qr appears
                 setTimeout(() => updateStatus(), 1000);
             } catch (e) {

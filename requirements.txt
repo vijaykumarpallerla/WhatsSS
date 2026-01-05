@@ -9,3 +9,6 @@ pillow
 gunicorn
 requests
 gevent
+
+redis>=4.6.0
+python-dotenv>=1.0.0

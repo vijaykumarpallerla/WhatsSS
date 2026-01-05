@@ -27,6 +27,35 @@ import socket
 from groq import Groq
 import qrcode
 import datetime
+import re
+try:
+    import redis
+except Exception:
+    redis = None
+
+# Load .env (prefer python-dotenv, fallback to manual parser)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+    print("Loaded .env via python-dotenv", flush=True)
+except Exception:
+    env_path = os.path.join(os.path.dirname(__file__), '.env')
+    if os.path.exists(env_path):
+        try:
+            with open(env_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    if '=' in line:
+                        k, v = line.split('=', 1)
+                        v = v.strip()
+                        if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+                            v = v[1:-1]
+                        os.environ.setdefault(k.strip(), v)
+            print("Loaded .env manually", flush=True)
+        except Exception as e:
+            print(f"Error loading .env: {e}", flush=True)
 
 # Ensure stdout/stderr use UTF-8 to avoid UnicodeEncodeError on Windows consoles
 try:
@@ -219,6 +248,88 @@ os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1'
 APP_FOLDER = os.path.dirname(os.path.abspath(__file__))
 USER_DATA_FOLDER = os.path.join(APP_FOLDER, "whatsapp_sessions")
 os.makedirs(USER_DATA_FOLDER, exist_ok=True)
+
+# --- REDIS / UPSTASH CONFIG ---
+# Support multiple env var names and strip surrounding quotes (your .env uses
+# UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN with quotes).
+def _clean_env(v):
+    if v is None:
+        return None
+    v = v.strip()
+    if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+        return v[1:-1]
+    return v
+
+REDIS_URL = _clean_env(os.environ.get('REDIS_URL') or os.environ.get('REDIS_TLS_URL'))
+UPSTASH_REST_URL = _clean_env(os.environ.get('UPSTASH_REDIS_REST_URL') or os.environ.get('UPSTASH_REST_URL') or os.environ.get('UPSTASH_URL') or os.environ.get('UPSTASH_REDIS_URL'))
+UPSTASH_REST_TOKEN = _clean_env(os.environ.get('UPSTASH_REDIS_REST_TOKEN') or os.environ.get('UPSTASH_REST_TOKEN') or os.environ.get('UPSTASH_TOKEN'))
+
+redis_client = None
+if REDIS_URL and redis:
+    try:
+        redis_client = redis.from_url(REDIS_URL)
+        print("Initialized redis client from REDIS_URL", flush=True)
+    except Exception as e:
+        print(f"Redis init error: {e}", flush=True)
+elif UPSTASH_REST_URL and UPSTASH_REST_TOKEN:
+    print("Upstash REST configured; will use REST API for QR storage", flush=True)
+
+# QR TTL (seconds) for storing QR in Redis/Upstash; default 300s
+QR_TTL = int(_clean_env(os.environ.get('QR_TTL') or '300') or 300)
+
+def set_qr_in_store(user_id, data_bytes, ttl=300):
+    key = f"qr:{user_id}"
+    try:
+        if redis_client:
+            redis_client.set(key, data_bytes, ex=ttl)
+            return True
+        if UPSTASH_REST_URL and UPSTASH_REST_TOKEN:
+            url = UPSTASH_REST_URL.rstrip('/') + f"/set/{key}"
+            b64 = base64.b64encode(data_bytes).decode()
+            headers = {'Authorization': f'Bearer {UPSTASH_REST_TOKEN}'}
+            resp = requests.post(url, json={"value": b64}, headers=headers, timeout=5)
+            return resp.status_code == 200
+    except Exception as e:
+        print(f"set_qr_in_store error: {e}", flush=True)
+    return False
+
+def get_qr_from_store(user_id):
+    key = f"qr:{user_id}"
+    try:
+        if redis_client:
+            val = redis_client.get(key)
+            if val:
+                return val if isinstance(val, (bytes, bytearray)) else val.encode()
+        if UPSTASH_REST_URL and UPSTASH_REST_TOKEN:
+            url = UPSTASH_REST_URL.rstrip('/') + f"/get/{key}"
+            headers = {'Authorization': f'Bearer {UPSTASH_REST_TOKEN}'}
+            resp = requests.get(url, headers=headers, timeout=5)
+            if resp.status_code == 200:
+                j = resp.json()
+                v = j.get('result') or j.get('value') or j.get('result_raw') or j.get('value_raw')
+                if v:
+                    try:
+                        return base64.b64decode(v)
+                    except Exception:
+                        return v.encode()
+    except Exception as e:
+        print(f"get_qr_from_store error: {e}", flush=True)
+    return None
+
+def delete_qr_in_store(user_id):
+    key = f"qr:{user_id}"
+    try:
+        if redis_client:
+            redis_client.delete(key)
+            return True
+        if UPSTASH_REST_URL and UPSTASH_REST_TOKEN:
+            url = UPSTASH_REST_URL.rstrip('/') + f"/del/{key}"
+            headers = {'Authorization': f'Bearer {UPSTASH_REST_TOKEN}'}
+            resp = requests.post(url, headers=headers, timeout=5)
+            return resp.status_code == 200
+    except Exception as e:
+        print(f"delete_qr_in_store error: {e}", flush=True)
+    return False
 
 # --- GLOBAL MANAGERS ---
 active_clients = {}
@@ -445,8 +556,18 @@ def get_client(user_id):
             # Persist QR image to a file so other gunicorn workers / processes can serve it
             filename = f"qr_user_{user_id}.png"
             filepath = os.path.join(USER_DATA_FOLDER, filename)
-            with open(filepath, 'wb') as f:
-                f.write(buffered.getvalue())
+            try:
+                with open(filepath, 'wb') as f:
+                    f.write(buffered.getvalue())
+            except Exception:
+                # If disk write fails, continue and rely on Redis/Upstash
+                pass
+
+            # Also store in shared store (Redis or Upstash REST) for multi-worker visibility
+            try:
+                set_qr_in_store(user_id, buffered.getvalue(), ttl=QR_TTL)
+            except Exception as e:
+                print(f"[User {user_id}] set_qr_in_store failed: {e}", flush=True)
 
             qr_data_store[user_id] = {"code": None, "connected": False, "file": filename}
             print(f"[User {user_id}] New QR Code Generated -> {filepath}", flush=True)
@@ -466,6 +587,11 @@ def get_client(user_id):
                         os.remove(os.path.join(USER_DATA_FOLDER, fn))
                     except Exception:
                         pass
+                    # remove from shared store as well
+                    try:
+                        delete_qr_in_store(user_id)
+                    except Exception:
+                        pass
                 qr_data_store[user_id] = {"connected": True, "code": None, "file": None}
         except Exception as e:
             print(f"Error in on_pair_status handler: {e}", flush=True)
@@ -479,6 +605,10 @@ def get_client(user_id):
                 os.remove(os.path.join(USER_DATA_FOLDER, fn))
             except Exception:
                 pass
+            try:
+                delete_qr_in_store(user_id)
+            except Exception:
+                pass
         qr_data_store[user_id] = {"connected": True, "code": None, "file": None}
 
     @client.event(LoggedOutEv)
@@ -487,6 +617,10 @@ def get_client(user_id):
         if fn:
             try:
                 os.remove(os.path.join(USER_DATA_FOLDER, fn))
+            except Exception:
+                pass
+            try:
+                delete_qr_in_store(user_id)
             except Exception:
                 pass
         qr_data_store[user_id] = {"connected": False, "code": None, "file": None}
@@ -540,32 +674,28 @@ def get_client(user_id):
 
             # --- CORRECTED LOGIC START ---
             
-            # 1. Check Master Toggle (renamed concept in UI to "Enable AI Processing")
-            is_ai_enabled = config.get("auto_allow", False) # We use the existing 'auto_allow' db field as the Master Switch
-            if not is_ai_enabled:
-                print("Ignored: AI Processing is OFF.")
+            # Determine if this is a group JID. Use a heuristic that matches common
+            # WhatsApp group identifiers (e.g. ending with '@g.us' or numeric IDs that
+            # start with '120'). This lets us store only group messages for the UI.
+            def is_group_jid(jid):
+                try:
+                    s = str(jid)
+                    if '@g.us' in s: return True
+                    if s.startswith('120'): return True
+                    # fallback: consider presence of 'g.' or 'group' as group
+                    if 'g.' in s or 'group' in s.lower(): return True
+                except Exception:
+                    pass
+                return False
+
+            # If not a group, ignore (we only want groups in Recent Groups)
+            if not is_group_jid(chat_jid):
                 return
 
-            # 2. Check Time Window
-            start_time_str = config.get("start_time", "09:00")
-            end_time_str = config.get("end_time", "18:00")
-            
-            # Calculate IST Time for comparison
-            utc_now = datetime.datetime.now(datetime.timezone.utc)
-            ist_now = utc_now + timedelta(hours=5, minutes=30)
-            current_time_str = ist_now.strftime("%H:%M")
-            
-            if not (start_time_str <= current_time_str <= end_time_str):
-                print(f"Ignored: Outside Time Window ({current_time_str} not in {start_time_str}-{end_time_str})")
-                return
-
-            # 3. Check Whitelist
-            # Only process if explicitly whitelisted
-            if chat_jid not in allowed_set:
-                print(f"Ignored: Group {chat_jid} not in whitelist.")
-                return 
-
-            # --- CORRECTED LOGIC END ---
+            # --- Saving vs Processing ---
+            # Always save group messages so the Recent Groups UI can show them.
+            # Keep AI/email processing gated by the existing toggles (auto_allow),
+            # time window, and whitelist to avoid changing processing behaviour.
             
             message_text = ""
             
@@ -714,6 +844,9 @@ def update_config():
 def connect_whatsapp():
     print("Connect WhatsApp route hit", flush=True)
     if 'user_id' not in session:
+        # If this is an AJAX/fetch call, return 401 JSON so the UI can redirect.
+        if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+            return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
         return redirect(url_for('login'))
         
     user_id = session['user_id']
@@ -728,7 +861,11 @@ def connect_whatsapp():
             print(f"Client Connect Error: {e}", flush=True)
             
     threading.Thread(target=start_client, daemon=True).start()
-    
+    # If this was triggered via AJAX from the dashboard, return JSON so the UI
+    # remains on the dashboard and can poll for the QR.
+    if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+        return jsonify({'status': 'started'})
+
     return render_template('whatsapp.html')
 
 @app.route('/qr_status')
@@ -754,6 +891,13 @@ def qr_image(filename):
     # Serve QR images from USER_DATA_FOLDER. Prevent path traversal by resolving path.
     safe_path = os.path.join(USER_DATA_FOLDER, os.path.basename(filename))
     if not os.path.exists(safe_path):
+        # If file not found on disk, try to fetch from Redis/Upstash when filename matches our pattern
+        m = re.match(r'^qr_user_(\d+)\.png$', os.path.basename(filename))
+        if m:
+            uid = m.group(1)
+            data = get_qr_from_store(uid)
+            if data:
+                return send_file(io.BytesIO(data), mimetype='image/png')
         return jsonify({'error': 'not found'}), 404
     return send_file(safe_path, mimetype='image/png')
 
