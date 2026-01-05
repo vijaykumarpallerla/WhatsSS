@@ -890,6 +890,16 @@ def qr_status():
     data = qr_data_store.get(user_id)
     if data is None:
         data = qr_data_store.get(None, {"connected": False, "code": None})
+        # If no in-memory QR found for this worker, try the shared store (Redis/Upstash)
+        # This lets other workers generate the QR and still have this worker report it.
+        try:
+            if user_id is not None:
+                stored = get_qr_from_store(user_id)
+                if stored:
+                    filename = f"qr_user_{user_id}.png"
+                    data = {"connected": False, "code": None, "file": filename}
+        except Exception:
+            pass
     # If a filename is present, convert it to an accessible URL
     file_name = data.get('file') if isinstance(data, dict) else None
     result = {k: v for k, v in data.items()} if isinstance(data, dict) else data
