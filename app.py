@@ -15,19 +15,32 @@ import io
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from pathlib import Path
-from flask import Flask, render_template, request, redirect, url_for, jsonify, session, flash
-from werkzeug.security import generate_password_hash, check_password_hash
+from flask import Flask, render_template, request, redirect, url_for, jsonify, session, flash, Response, stream_with_context
+from werkzeug.security import generate_password_hash, check_password_hash # Keeping for safety, though unused
 from neonize.client import NewClient
 from neonize.events import ConnectedEv, MessageEv, PairStatusEv, LoggedOutEv, QREv
 from neonize.types import MessageServerID
 from neonize.utils import log
 from datetime import timedelta
 import socket
-import smtplib
-from email.mime.text import MIMEText
+# import smtplib # Removed SMTP
+# from email.mime.text import MIMEText # Removed SMTP MIME
 from groq import Groq
 import qrcode
 import datetime
+
+# Ensure stdout/stderr use UTF-8 to avoid UnicodeEncodeError on Windows consoles
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+except Exception:
+    os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
+
+# --- GOOGLE AUTH IMPORTS ---
+from google_auth_oauthlib.flow import Flow
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from google.auth.transport.requests import Request
 
 # --- CONFIGURATION ---
 # Database Connection
@@ -37,7 +50,27 @@ if not DB_URL:
     # For local testing, you must set this env var or uncomment the line below (TEMPORARILY)
     # DB_URL = "postgresql://neondb_owner:npg_Dqx2nsVjg0Ol@ep-flat-sky-ad2jtyax-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
     print("CRITICAL ERROR: DATABASE_URL environment variable is not set.")
-    # We won't exit here to allow you to set it, but app will fail on db connection
+
+# Google Auth Configuration
+CLIENT_SECRETS_FILE = "google.json"
+
+# Create google.json from environment variable if it doesn't exist (For Render)
+if not os.path.exists(CLIENT_SECRETS_FILE):
+    google_json_env = os.environ.get("GOOGLE_JSON")
+    if google_json_env:
+        try:
+            with open(CLIENT_SECRETS_FILE, "w") as f:
+                f.write(google_json_env)
+            print("Created google.json from environment variable.")
+        except Exception as e:
+            print(f"Error creating google.json: {e}")
+
+SCOPES = [
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+    "https://www.googleapis.com/auth/gmail.send",
+    "openid"
+]
 
 def get_ist_time():
     try:
@@ -50,41 +83,70 @@ def get_ist_time():
     return None
 
 # --- HELPER FUNCTIONS ---
-def send_email(config, subject, body, reply_to=None):
+
+def get_google_creds(user_id):
+    """Retrieve and refresh Google Credentials for a user."""
+    conn = None
     try:
-        sender_email = config.get("email_user")
-        sender_pass = config.get("email_pass")
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT google_token FROM users WHERE id=%s", (user_id,))
+        row = c.fetchone()
+        
+        if not row or not row['google_token']:
+            return None
+            
+        token_data = json.loads(row['google_token'])
+        creds = Credentials.from_authorized_user_info(token_data, SCOPES)
+        
+        if creds and creds.expired and creds.refresh_token:
+            print("Refreshing Google Token...", flush=True)
+            creds.refresh(Request())
+            # Save refreshed token back to DB
+            c.execute("UPDATE users SET google_token=%s WHERE id=%s", (creds.to_json(), user_id))
+            conn.commit()
+            
+        return creds
+    except Exception as e:
+        print(f"Auth Error: {e}", flush=True)
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+def send_email(config, subject, body, reply_to=None):
+    """Send email using Gmail API."""
+    try:
+        # We need the user_id to fetch credentials. 
+        # Since this function is called from the main loop, we need to pass user_id in config or arguments.
+        # Assuming config now has 'user_id'
+        user_id = config.get("user_id")
         dest_email = config.get("dest_email")
 
-        if not sender_email or not sender_pass or not dest_email:
-            print("Email configuration missing.")
+        if not user_id or not dest_email:
+            print("Email configuration missing (user_id or dest_email).", flush=True)
             return False
 
-        msg = MIMEText(body)
-        msg['Subject'] = subject
-        msg['From'] = sender_email
-        msg['To'] = dest_email
-        
+        creds = get_google_creds(user_id)
+        if not creds:
+            print("No valid Google Credentials found for user.", flush=True)
+            return False
+
+        service = build('gmail', 'v1', credentials=creds)
+
+        message_text = f"To: {dest_email}\nSubject: {subject}\n\n{body}"
         if reply_to:
-            msg.add_header('Reply-To', reply_to)
+             message_text = f"Reply-To: {reply_to}\n" + message_text
+             
+        raw_message = base64.urlsafe_b64encode(message_text.encode("utf-8")).decode("utf-8")
+        message = {'raw': raw_message}
 
-        # Force IPv4 Resolution for Render
-        gmail_host = 'smtp.gmail.com'
-        try:
-            gmail_ip = socket.gethostbyname(gmail_host)
-            print(f"Resolved {gmail_host} to {gmail_ip}", flush=True)
-        except Exception as e:
-            print(f"DNS Error: {e}", flush=True)
-            gmail_ip = gmail_host # Fallback
-
-        with smtplib.SMTP(gmail_ip, 587) as server:
-            server.starttls()
-            server.login(sender_email, sender_pass)
-            server.sendmail(sender_email, dest_email, msg.as_string())
-        print(f"Email sent to {dest_email}", flush=True)
+        sent_message = service.users().messages().send(userId="me", body=message).execute()
+        print(f"Email sent to {dest_email} (Msg ID: {sent_message['id']})", flush=True)
         return True
+
     except Exception as e:
-        print(f"Email Error: {e}", flush=True)
+        print(f"Gmail API Error: {e}", flush=True)
         return False
 
 def analyze_message(api_key, text):
@@ -140,7 +202,7 @@ def analyze_message(api_key, text):
         if match:
             json_str = match.group(0)
             return json.loads(json_str)
-
+            
     except Exception as e:
         print(f"AI Error: {e}", flush=True)
         
@@ -151,8 +213,10 @@ app = Flask(__name__)
 app.secret_key = "super_secret_key_change_this_in_production"
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 
+# Allow OAuth over HTTP for local testing
+os.environ['OAUTHLIB_INSECURE_TRANSPORT'] = '1' 
+
 # --- DATA STORAGE PATHS ---
-# For Render (Ephemeral), we store cognitive.db in the current working directory
 APP_FOLDER = os.path.dirname(os.path.abspath(__file__))
 USER_DATA_FOLDER = os.path.join(APP_FOLDER, "whatsapp_sessions")
 os.makedirs(USER_DATA_FOLDER, exist_ok=True)
@@ -167,27 +231,37 @@ def get_db_connection():
     return conn
 
 def init_db():
+    # If no DATABASE_URL is configured, skip DB initialization to allow
+    # local testing without a Postgres server.
+    if not DB_URL:
+        print("DATABASE_URL not set — skipping DB initialization.", flush=True)
+        return
+
     try:
         conn = get_db_connection()
         c = conn.cursor()
         
-        # 1. Users Table
+        # 1. Users Table (Modified for Google Auth)
+        # We add google_token column if it doesn't exist
         c.execute('''CREATE TABLE IF NOT EXISTS users
-                     (id SERIAL PRIMARY KEY, username TEXT UNIQUE, email TEXT, password TEXT)''')
+                     (id SERIAL PRIMARY KEY, username TEXT UNIQUE, email TEXT, password TEXT, google_token TEXT)''')
         
-        # 2. User Configs Table (Stores JSON config per user)
+        try:
+            c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS google_token TEXT")
+        except:
+            pass
+
+        # 2. User Configs Table
         c.execute('''CREATE TABLE IF NOT EXISTS user_configs
                      (user_id INTEGER PRIMARY KEY REFERENCES users(id), config JSONB)''')
         
-        # 3. Messages Table (Stores chat history)
-        # Added content_hash for duplicate detection and sent_email for stats
+        # 3. Messages Table
         c.execute('''CREATE TABLE IF NOT EXISTS messages
                      (id SERIAL PRIMARY KEY, user_id INTEGER REFERENCES users(id), 
                       group_jid TEXT, sender TEXT, text TEXT, timestamp TEXT, 
                       content_hash TEXT, sent_email BOOLEAN DEFAULT FALSE,
                       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
         
-        # Migration: Add columns if not exists
         try:
             c.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS content_hash TEXT")
             c.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS sent_email BOOLEAN DEFAULT FALSE")
@@ -198,21 +272,6 @@ def init_db():
         print("Neon Database Initialized Successfully.")
     except Exception as e:
         print(f"DB Init Error: {e}")
-    finally:
-        if conn:
-            conn.close()
-
-def get_user(username):
-    conn = None
-    try:
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute("SELECT * FROM users WHERE username=%s", (username,))
-        user = c.fetchone()
-        return user
-    except Exception as e:
-        print(f"DB Error (get_user): {e}")
-        return None
     finally:
         if conn:
             conn.close()
@@ -232,30 +291,39 @@ def get_user_by_email(email):
         if conn:
             conn.close()
 
-def create_user(username, email, password):
+def create_or_update_google_user(email, token_json):
     conn = None
     try:
         conn = get_db_connection()
         c = conn.cursor()
-        hashed_pw = generate_password_hash(password)
-        c.execute("INSERT INTO users (username, email, password) VALUES (%s, %s, %s) RETURNING id", (username, email, hashed_pw))
-        user_id = c.fetchone()['id']
         
-        # Initialize default config
-        default_config = {
-            "email_user": "", "email_pass": "", "dest_email": "",
-            "allowed_jids": [], "groq_api_key": "",
-            "auto_allow": False, "start_time": "09:00", "end_time": "18:00"
-        }
-        c.execute("INSERT INTO user_configs (user_id, config) VALUES (%s, %s)", (user_id, json.dumps(default_config)))
+        # Check if user exists
+        c.execute("SELECT id FROM users WHERE email=%s", (email,))
+        existing = c.fetchone()
         
+        if existing:
+            user_id = existing['id']
+            c.execute("UPDATE users SET google_token=%s WHERE id=%s", (token_json, user_id))
+        else:
+            # Create new user
+            # Username is email for simplicity
+            c.execute("INSERT INTO users (username, email, google_token) VALUES (%s, %s, %s) RETURNING id", 
+                      (email, email, token_json))
+            user_id = c.fetchone()['id']
+            
+            # Initialize default config
+            default_config = {
+                "dest_email": "", # Default to empty, user must set it
+                "allowed_jids": [], "groq_api_key": "",
+                "auto_allow": False, "start_time": "09:00", "end_time": "18:00"
+            }
+            c.execute("INSERT INTO user_configs (user_id, config) VALUES (%s, %s)", (user_id, json.dumps(default_config)))
+            
         conn.commit()
-        return True
-    except psycopg2.IntegrityError:
-        return False
+        return user_id
     except Exception as e:
-        print(f"DB Error (create_user): {e}")
-        return False
+        print(f"DB Error (create_google_user): {e}")
+        return None
     finally:
         if conn:
             conn.close()
@@ -268,13 +336,15 @@ def load_user_config(user_id):
         c.execute("SELECT config FROM user_configs WHERE user_id=%s", (user_id,))
         res = c.fetchone()
         if res:
-            return res['config']
+            config = res['config']
+            config['user_id'] = user_id # Inject user_id for send_email
+            return config
     except Exception as e:
         print(f"DB Error (load_config): {e}")
     finally:
         if conn:
             conn.close()
-    return {}
+    return {"user_id": user_id}
 
 def save_user_config(user_id, config):
     conn = None
@@ -312,7 +382,6 @@ def is_duplicate_message(user_id, text):
         content_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
         conn = get_db_connection()
         c = conn.cursor()
-        # Check if message with same hash exists for this user
         c.execute("SELECT id FROM messages WHERE user_id=%s AND content_hash=%s", (user_id, content_hash))
         if c.fetchone():
             is_dup = True
@@ -330,16 +399,12 @@ def get_email_stats(user_id):
         conn = get_db_connection()
         c = conn.cursor()
         
-        # Total Sent
         c.execute("SELECT COUNT(*) FROM messages WHERE user_id=%s AND sent_email=TRUE", (user_id,))
         stats["total"] = c.fetchone()['count']
         
-        # Today Sent (IST Calculation)
-        # We'll calculate "Start of Today IST" in UTC to query the DB efficiently
         utc_now = datetime.datetime.now(datetime.timezone.utc)
         ist_now = utc_now + timedelta(hours=5, minutes=30)
         ist_start_of_day = ist_now.replace(hour=0, minute=0, second=0, microsecond=0)
-        # Convert back to UTC for the query (approximate, since created_at is DB server time, usually UTC)
         utc_start_of_day = ist_start_of_day - timedelta(hours=5, minutes=30)
         
         c.execute("SELECT COUNT(*) FROM messages WHERE user_id=%s AND sent_email=TRUE AND created_at >= %s", (user_id, utc_start_of_day))
@@ -352,394 +417,433 @@ def get_email_stats(user_id):
             conn.close()
     return stats
 
-def mark_email_sent(user_id, content_hash):
-    conn = None
-    try:
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute("UPDATE messages SET sent_email = TRUE WHERE user_id=%s AND content_hash=%s", (user_id, content_hash))
-        conn.commit()
-    except Exception as e:
-        print(f"Mark Sent Error: {e}")
-    finally:
-        if conn:
-            conn.close()
-
-def get_recent_messages(user_id):
-    conn = None
-    groups = {}
-    try:
-        conn = get_db_connection()
-        c = conn.cursor()
-        # Fetch last 50 messages for this user
-        c.execute("SELECT group_jid, sender, text, timestamp FROM messages WHERE user_id=%s ORDER BY id DESC LIMIT 50", (user_id,))
-        rows = c.fetchall()
-        
-        config = load_user_config(user_id)
-        whitelisted = {item["jid"] for item in config.get("allowed_jids", [])}
-        
-        for row in rows:
-            jid = row['group_jid']
-            if jid not in groups:
-                groups[jid] = {
-                    "whitelisted": jid in whitelisted,
-                    "messages": []
-                }
-            # Add message if we don't have too many for this group yet
-            if len(groups[jid]["messages"]) < 5:
-                groups[jid]["messages"].insert(0, { # Insert at beginning to keep chronological order
-                    "sender": row['sender'],
-                    "text": row['text'],
-                    "timestamp": row['timestamp']
-                })
-                
-    except Exception as e:
-        print(f"DB Error (get_recent): {e}")
-    finally:
-        if conn:
-            conn.close()
-    return groups
-
 # --- WHATSAPP CLIENT MANAGEMENT ---
-def get_user_db_path(user_id):
-    return os.path.join(USER_DATA_FOLDER, f"whatsapp_session_{user_id}.db")
-def start_bot_for_user(user_id):
+def get_client(user_id):
+    print(f"Getting client for user {user_id}", flush=True)
     if user_id in active_clients:
-        return # Already running
+        print("Returning active client", flush=True)
+        return active_clients[user_id]
+        print(f"WhatsApp Connected for user {user_id}", flush=True)
 
-    db_path = get_user_db_path(user_id)
+    # Create a per-user NewClient instance and register QR callback
+    db_path = os.path.join(USER_DATA_FOLDER, f"whatsapp_session_{user_id}.db")
+    try:
+        client = NewClient(db_path)
+    except Exception:
+        # Fallback to unnamed client if DB path is not accepted
+        client = NewClient()
 
-    # Client Setup
-    client = NewClient(db_path)
-
-    # Callback for QR Code
     @client.qr
-    def on_qr(client, code_bytes: bytes):
+    def on_qr(client_obj, code_bytes: bytes):
         try:
-            # Generate QR Image from bytes
             qr = qrcode.QRCode()
             qr.add_data(code_bytes)
             qr.make(fit=True)
-            
             img = qr.make_image(fill_color="black", back_color="white")
-            
             buffered = io.BytesIO()
-            img.save(buffered, format="PNG")
+            img.save(buffered, format='PNG')
             qr_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-
-            qr_data_store[user_id] = {
-                "code": qr_base64,
-                "connected": False
-            }
-            print(f"[User {user_id}] New QR Code Generated (captured via callback)")
+            qr_data_store[user_id] = {"code": qr_base64, "connected": False}
+            print(f"[User {user_id}] New QR Code Generated", flush=True)
         except Exception as e:
-             print(f"[User {user_id}] Error processing QR callback: {e}")
-
-    @client.event(ConnectedEv)
-    def on_connect(client, event):
-        print(f"[User {user_id}] Connected to WhatsApp!")
-        qr_data_store[user_id] = {"code": None, "connected": True}
+            print(f"[User {user_id}] Error processing QR callback: {e}", flush=True)
 
     @client.event(PairStatusEv)
-    def on_pair_status(client, event):
-        print(f"[User {user_id}] Pair Status: {event}")
+    def on_pair_status(client_obj, event: PairStatusEv):
+        print(f"Pair Status: {event}", flush=True)
+        try:
+            # event.id.id indicates a successful login/pair
+            if getattr(event, 'id', None) and getattr(event.id, 'id', None):
+                qr_data_store[user_id] = {"connected": True, "code": None}
+        except Exception as e:
+            print(f"Error in on_pair_status handler: {e}", flush=True)
+
+    @client.event(ConnectedEv)
+    def on_connected(client_obj, event: ConnectedEv):
+        print(f"Connected Event: {event}", flush=True)
+        qr_data_store[user_id] = {"connected": True, "code": None}
 
     @client.event(LoggedOutEv)
-    def on_logout(client, event):
-        print(f"[User {user_id}] Logged Out! Cleaning up session...")
-        qr_data_store[user_id] = {"code": None, "connected": False}
-        
-        # 1. Remove from active clients
+    def on_logged_out(client_obj, event: LoggedOutEv):
+        qr_data_store[user_id] = {"connected": False, "code": None}
         if user_id in active_clients:
             del active_clients[user_id]
-            
-        # 2. Try to disconnect and delete file
-        try:
-            # Attempt to disconnect to release file lock
-            if hasattr(client, 'disconnect'):
-                client.disconnect()
-            
-            # Wait a moment for file release
-            time.sleep(1)
-            
-            if os.path.exists(db_path):
-                os.remove(db_path)
-                print(f"[User {user_id}] Session file deleted successfully.")
-        except Exception as e:
-            print(f"[User {user_id}] Error during logout cleanup: {e}")
+        print(f"Logged out user {user_id}", flush=True)
 
     @client.event(MessageEv)
-    def on_message(client, message):
-        # 1. GET INFO
-        chat_id = message.Info.MessageSource.Chat
-        jid = chat_id.User
-        is_group = "g.us" in str(chat_id)
-        text = message.Message.conversation or message.Message.extendedTextMessage.text
-        
-        # 2. Store Group Messages (IN NEON)
-        if is_group and text:
-            timestamp = time.strftime("%I:%M %p")
-            sender_name = getattr(message.Info, "PushName", getattr(message.Info, "push_name", "Unknown"))
-            
-            # Check for duplicates BEFORE saving
-            is_dup = is_duplicate_message(user_id, text)
-            
-            # Save to DB (History)
-            save_message(user_id, jid, sender_name, text, timestamp)
-
-            # 3. Process Logic (Whitelist + AI)
-            config = load_user_config(user_id)
-            allowed_jids = {item["jid"] for item in config.get("allowed_jids", [])}
-            
-            # --- AUTO-ALLOW & TIME CHECK ---
-            should_process = False
-            if config.get("auto_allow", False):
-                try:
-                    # Fetch IST Time
-                    ist_time_str = get_ist_time()
-                    if ist_time_str:
-                        current_time = time.strptime(ist_time_str, "%H:%M")
-                        start_time = time.strptime(config.get("start_time", "09:00"), "%H:%M")
-                        end_time = time.strptime(config.get("end_time", "18:00"), "%H:%M")
-                        
-                        if start_time <= current_time <= end_time:
-                            should_process = True
-                        else:
-                            print(f"[User {user_id}] Message skipped: Outside allowed time window ({ist_time_str})")
-                    else:
-                        print(f"[User {user_id}] Message skipped: Could not fetch IST time")
-                except Exception as e:
-                    print(f"[User {user_id}] Time Check Error: {e}")
-            else:
-                print(f"[User {user_id}] Message skipped: Auto-Allow is OFF")
-
-            if should_process and str(jid) in allowed_jids and text:
-                if is_dup:
-                    print(f"[User {user_id}] Skipping AI Alert: Duplicate Message.")
-                    return
-
-                print(f"[User {user_id}] Processing message from {jid}", flush=True)
-                
-                api_key = config.get("groq_api_key")
-                if api_key:
-                    result = analyze_message(api_key, text)
-                    if result.get("is_usa_hiring"):
-                        print(f"[User {user_id}] AI Match: YES. Sending email...", flush=True)
-                        
-                        role = result.get("role", "Unknown Role")
-                        extracted_email = result.get("email")
-                        
-                        subject = f"Whatsapp Alert New job Found : {role}"
-                        body = f"Sender: {sender_name}\nGroup: {jid}\n\nRole: {role}\nEmail: {extracted_email}\n\nMessage:\n{text}"
-                        
-                        if send_email(config, subject, body, reply_to=extracted_email):
-                            # Mark as sent in DB ONLY if email success
-                            content_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
-                            mark_email_sent(user_id, content_hash)
-                        else:
-                            print(f"[User {user_id}] Email failed to send. Not marking as sent.", flush=True)
-                        
-                    else:
-                        print(f"[User {user_id}] AI Match: NO", flush=True)
-                else:
-                    print(f"[User {user_id}] No API Key configured.")
-
-    # Start Client in Thread
-    def run_client():
+    def on_message(client_obj, event: MessageEv):
         try:
-            client.connect()
+            print(f"DEBUG: Received MessageEv", flush=True)
+            # Basic message handling logic
+            config = load_user_config(user_id)
+            if not config:
+                return
+
+            # Handle event.info vs event.Info
+            info = getattr(event, 'info', getattr(event, 'Info', None))
+            if not info:
+                print(f"DEBUG: No info/Info in event: {dir(event)}", flush=True)
+                return
+
+            # Robust JID extraction
+            source = getattr(info, 'message_source', getattr(info, 'MessageSource', None))
+            if not source:
+                print(f"DEBUG: No MessageSource in info: {dir(info)}", flush=True)
+                return
+
+            chat = getattr(source, 'chat', getattr(source, 'Chat', None))
+            sender = getattr(source, 'sender', getattr(source, 'Sender', None))
+            
+            if not chat or not sender:
+                 print(f"DEBUG: Missing chat/sender in source: {dir(source)}", flush=True)
+                 return
+
+            chat_jid = getattr(chat, 'user', getattr(chat, 'User', None)) or \
+                       getattr(chat, '_serialized', getattr(chat, 'Serialized', None))
+            
+            sender_jid = getattr(sender, 'user', getattr(sender, 'User', None)) or \
+                         getattr(sender, '_serialized', getattr(sender, 'Serialized', None))
+            
+            # Check if group is allowed
+            allowed_jids = config.get("allowed_jids", [])
+            # Normalize allowed_jids to set of strings
+            allowed_set = set()
+            for item in allowed_jids:
+                if isinstance(item, dict):
+                    allowed_set.add(item.get('jid'))
+                else:
+                    allowed_set.add(item)
+
+            auto_allow = config.get("auto_allow", False)
+            
+            message_text = ""
+            
+            # Robust Message Text Extraction
+            msg_obj = getattr(event, 'message', getattr(event, 'Message', None))
+            if msg_obj:
+                conversation = getattr(msg_obj, 'conversation', getattr(msg_obj, 'Conversation', None))
+                extended = getattr(msg_obj, 'extended_text_message', getattr(msg_obj, 'ExtendedTextMessage', None))
+                
+                if conversation:
+                    message_text = conversation
+                elif extended:
+                    message_text = getattr(extended, 'text', getattr(extended, 'Text', None))
+            
+            if not message_text:
+                return
+
+            # Duplicate check
+            if is_duplicate_message(user_id, message_text):
+                print("Duplicate message ignored.")
+                return
+
+            # Save message
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            save_message(user_id, chat_jid, sender_jid, message_text, timestamp)
+            
+            # Check whitelist
+            if chat_jid not in allowed_set:
+                if auto_allow:
+                    # Add as object
+                    allowed_jids.append({"jid": chat_jid, "name": "Unknown"})
+                    config['allowed_jids'] = allowed_jids
+                    save_user_config(user_id, config)
+                    print(f"Auto-allowed group: {chat_jid}")
+                else:
+                    return # Not allowed
+
+            # Analyze and Send Email
+            analysis = analyze_message(config.get("groq_api_key"), message_text)
+            if analysis.get("is_usa_hiring"):
+                role = analysis.get('role', 'Unknown Role')
+                extracted_email = analysis.get('email')
+                
+                subject = f"{{Whatsapp Alert}} New Job Found role {role}"
+                body = f"Role: {role}\nEmail: {extracted_email}\n\nOriginal Post:\n{message_text}"
+                
+                send_email(config, subject, body, reply_to=extracted_email)
+
         except Exception as e:
-            print(f"[User {user_id}] Client Error: {e}")
+            print(f"Message Error: {e}", flush=True)
+            try:
+                import traceback
+                traceback.print_exc()
+            except:
+                pass
 
-    t = threading.Thread(target=run_client, daemon=True)
-    t.start()
-    
     active_clients[user_id] = client
+    return client
 
-# --- ROUTES ---
-@app.route("/")
+# --- FLASK ROUTES ---
+
+@app.route('/')
 def index():
-    if "user_id" not in session:
-        return redirect(url_for("login"))
-    
-    user_id = session["user_id"]
-    user = get_user(session["username"]) # Refresh user data
-    config = load_user_config(user_id)
-    
-    # Ensure bot is running
-    if user_id not in active_clients:
-        start_bot_for_user(user_id)
-        
-    return render_template("index.html", username=session["username"], config=config)
+    if 'user_id' in session:
+        return redirect(url_for('dashboard'))
+    return redirect(url_for('login'))
 
-@app.route("/login", methods=["GET", "POST"])
+@app.route('/login')
 def login():
-    if request.method == "POST":
-        username = request.form["username"]
-        password = request.form["password"]
+    if 'user_id' in session:
+        return redirect(url_for('dashboard'))
+    return render_template('login.html')
+
+@app.route('/google_auth')
+def google_auth():
+    # Google OAuth Flow
+    flow = Flow.from_client_secrets_file(
+        CLIENT_SECRETS_FILE, scopes=SCOPES,
+        redirect_uri=url_for('callback', _external=True))
+    
+    authorization_url, state = flow.authorization_url(
+        access_type='offline', include_granted_scopes='true', prompt='consent')
+    
+    session['state'] = state
+    return redirect(authorization_url)
+
+@app.route('/callback')
+def callback():
+    state = session.get('state')
+    if not state:
+        return redirect(url_for('login'))
         
-        user = get_user(username)
-        if user and check_password_hash(user['password'], password):
-            session["user_id"] = user['id']
-            session["username"] = user['username']
-            return redirect(url_for("index"))
-        else:
-            return render_template("login.html", error="Invalid credentials")
-            
-    return render_template("login.html")
-
-@app.route("/register", methods=["GET", "POST"])
-def register():
-    if request.method == "POST":
-        username = request.form["username"]
-        email = request.form["email"]
-        password = request.form["password"]
-        confirm_password = request.form["confirm_password"]
+    flow = Flow.from_client_secrets_file(
+        CLIENT_SECRETS_FILE, scopes=SCOPES, state=state,
+        redirect_uri=url_for('callback', _external=True))
         
-        if password != confirm_password:
-            return render_template("register.html", error="Passwords do not match")
-            
-        # Email Validation
-        if not email.endswith("@srimatech.com") and email != "vijayypallerla@gmail.com":
-             return render_template("register.html", error="Email domain not allowed.")
+    flow.fetch_token(authorization_response=request.url)
+    creds = flow.credentials
+    
+    # Get User Info
+    service = build('oauth2', 'v2', credentials=creds)
+    user_info = service.userinfo().get().execute()
+    email = user_info.get('email')
+    
+    # Create/Update User in DB
+    user_id = create_or_update_google_user(email, creds.to_json())
+    session['user_id'] = user_id
+    session['email'] = email
+    
+    return redirect(url_for('dashboard'))
 
-        if create_user(username, email, password):
-            return render_template("login.html", message="Account created! Please login.")
-        else:
-            return render_template("register.html", error="Username or Email already exists")
-            
-    return render_template("register.html")
-
-@app.route("/logout")
-def logout():
-    session.clear()
-    return redirect(url_for("login"))
-
-@app.route("/save", methods=["POST"])
-def save_config():
-    if "user_id" not in session:
-        return redirect(url_for("login"))
+@app.route('/dashboard')
+def dashboard():
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
         
-    user_id = session["user_id"]
-    current_config = load_user_config(user_id)
+    user_id = session['user_id']
+    config = load_user_config(user_id)
+    stats = get_email_stats(user_id)
+    
+    return render_template('index.html', config=config, stats=stats)
+
+@app.route('/update_config', methods=['POST'])
+def update_config():
+    if 'user_id' not in session:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+        
+    user_id = session['user_id']
+    data = request.form.to_dict()
+    
+    config = load_user_config(user_id)
     
     # Update fields
-    current_config["email_user"] = request.form.get("email_user")
-    current_config["email_pass"] = request.form.get("email_pass")
-    current_config["dest_email"] = request.form.get("dest_email")
-    current_config["groq_api_key"] = request.form.get("groq_api_key")
+    config['dest_email'] = data.get('dest_email', config.get('dest_email'))
+    config['groq_api_key'] = data.get('groq_api_key', config.get('groq_api_key'))
+    config['auto_allow'] = 'auto_allow' in data
+    config['start_time'] = data.get('start_time', config.get('start_time'))
+    config['end_time'] = data.get('end_time', config.get('end_time'))
     
-    current_config["auto_allow"] = "auto_allow" in request.form
-    current_config["start_time"] = request.form.get("start_time")
-    current_config["end_time"] = request.form.get("end_time")
-    
-    save_user_config(user_id, current_config)
-    return render_template("index.html", 
-                           username=session["username"], 
-                           config=current_config,
-                           message="Settings saved successfully!")
+    save_user_config(user_id, config)
+    flash("Settings updated successfully!")
+    return redirect(url_for('dashboard'))
 
-@app.route("/qr_status")
+@app.route('/connect_whatsapp')
+def connect_whatsapp():
+    print("Connect WhatsApp route hit", flush=True)
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+        
+    user_id = session['user_id']
+    client = get_client(user_id)
+    
+    def start_client():
+        print(f"Starting client thread for user {user_id}", flush=True)
+        try:
+            client.connect()
+            print("Client connect() called", flush=True)
+        except Exception as e:
+            print(f"Client Connect Error: {e}", flush=True)
+            
+    threading.Thread(target=start_client, daemon=True).start()
+    
+    return render_template('whatsapp.html')
+
+@app.route('/qr_status')
 def qr_status():
-    if "user_id" not in session:
-        return jsonify({"error": "Unauthorized"}), 401
-        
-    user_id = session["user_id"]
-    if user_id not in active_clients:
-        start_bot_for_user(user_id)
-        
-    data = qr_data_store.get(user_id, {"code": None, "connected": False})
+    # Return per-session QR status, fall back to session-less (None) entry
+    user_id = session.get('user_id', None)
+    data = qr_data_store.get(user_id)
+    if data is None:
+        data = qr_data_store.get(None, {"connected": False, "code": None})
     return jsonify(data)
 
-@app.route("/group_messages")
-def group_messages():
-    if "user_id" not in session:
-        return jsonify({})
-    return jsonify(get_recent_messages(session["user_id"]))
 
-@app.route("/add_to_whitelist", methods=["POST"])
-def add_to_whitelist():
-    if "user_id" not in session:
-        return jsonify({"error": "Unauthorized"}), 401
+@app.route('/qr_stream')
+def qr_stream():
+    # Server-Sent Events stream for real-time QR/connection status
+    # Allow fallback to session-less stream (key None) so UI can receive
+    # updates even if the client was started without a logged-in session.
+    user_id = session.get('user_id', None)
+
+    def event_stream(uid):
+        last = None
+        while True:
+            try:
+                data = qr_data_store.get(uid, {"connected": False, "code": None})
+                # Only send when changed to reduce chatter
+                if data != last:
+                    yield f"data: {json.dumps(data)}\n\n"
+                    last = data.copy() if isinstance(data, dict) else data
+            except GeneratorExit:
+                break
+            except Exception as e:
+                # If anything goes wrong, send a minimal error payload and continue
+                try:
+                    yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                except Exception:
+                    pass
+            time.sleep(1)
+
+    return Response(stream_with_context(event_stream(user_id)), mimetype='text/event-stream')
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
+    
+@app.route('/toggle_group', methods=['POST'])
+def toggle_group():
+    if 'user_id' not in session:
+        return jsonify({"status": "error"}), 401
         
-    user_id = session["user_id"]
-    data = request.json
-    group_id = data.get("group_id")
+    user_id = session['user_id']
+    action = request.json.get('action')
+    jid = request.json.get('jid')
     
     config = load_user_config(user_id)
-    current_list = config.get("allowed_jids", [])
+    allowed = set(config.get('allowed_jids', []))
+    
+    if action == 'add':
+        allowed.add(jid)
+    elif action == 'remove' and jid in allowed:
+        allowed.remove(jid)
+        
+    config['allowed_jids'] = list(allowed)
+    save_user_config(user_id, config)
+    
+    return jsonify({"status": "success", "allowed_jids": list(allowed)})
+
+@app.route('/group_messages')
+def group_messages():
+    if 'user_id' not in session:
+        return jsonify({}), 401
+    user_id = session['user_id']
+    
+    conn = None
+    try:
+        conn = get_db_connection()
+        c = conn.cursor()
+        # Fetch last 100 messages to populate the feed
+        c.execute("SELECT * FROM messages WHERE user_id=%s ORDER BY id DESC LIMIT 100", (user_id,))
+        rows = c.fetchall()
+        
+        config = load_user_config(user_id)
+        
+        allowed_jids_raw = config.get('allowed_jids', [])
+        allowed_set = set()
+        for item in allowed_jids_raw:
+            if isinstance(item, dict):
+                allowed_set.add(item.get('jid'))
+            else:
+                allowed_set.add(item)
+        
+        grouped = {}
+        for row in rows:
+            gid = row['group_jid']
+            if gid not in grouped:
+                grouped[gid] = {
+                    "whitelisted": gid in allowed_set,
+                    "messages": []
+                }
+            grouped[gid]['messages'].append({
+                "sender": row['sender'],
+                "text": row['text'],
+                "timestamp": row['timestamp']
+            })
+            
+        # Reverse for chronological order (oldest to newest) so UI shows last one as latest
+        for gid in grouped:
+            grouped[gid]['messages'].reverse()
+            
+        return jsonify(grouped)
+    except Exception as e:
+        print(f"Group Messages Error: {e}")
+        return jsonify({})
+    finally:
+        if conn: conn.close()
+
+@app.route('/add_to_whitelist', methods=['POST'])
+def add_to_whitelist():
+    if 'user_id' not in session: return jsonify({"status": "error"}), 401
+    user_id = session['user_id']
+    data = request.json
+    jid = data.get('group_id')
+    
+    config = load_user_config(user_id)
+    allowed = config.get('allowed_jids', [])
     
     # Check if already exists
-    if not any(item['jid'] == group_id for item in current_list):
-        current_list.append({"jid": group_id, "name": f"Group {group_id[:10]}"})
-        config["allowed_jids"] = current_list
+    exists = False
+    for item in allowed:
+        if isinstance(item, dict) and item.get('jid') == jid:
+            exists = True
+        elif item == jid:
+            exists = True
+            
+    if not exists:
+        # Add as object
+        allowed.append({"jid": jid, "name": "Unknown"})
+        config['allowed_jids'] = allowed
         save_user_config(user_id, config)
         
-    return jsonify({"success": True})
+    return jsonify({"status": "success"})
 
-@app.route("/remove_from_whitelist", methods=["POST"])
+@app.route('/remove_from_whitelist', methods=['POST'])
 def remove_from_whitelist():
-    if "user_id" not in session:
-        return jsonify({"error": "Unauthorized"}), 401
-        
-    user_id = session["user_id"]
+    if 'user_id' not in session: return jsonify({"status": "error"}), 401
+    user_id = session['user_id']
     data = request.json
-    group_id = data.get("group_id")
+    jid = data.get('group_id')
     
     config = load_user_config(user_id)
-    current_list = config.get("allowed_jids", [])
+    allowed = config.get('allowed_jids', [])
     
-    # Filter out the item
-    new_list = [item for item in current_list if item['jid'] != group_id]
-    
-    if len(new_list) != len(current_list):
-        config["allowed_jids"] = new_list
-        save_user_config(user_id, config)
+    new_allowed = []
+    for item in allowed:
+        if isinstance(item, dict):
+            if item.get('jid') != jid:
+                new_allowed.append(item)
+        else:
+            if item != jid:
+                new_allowed.append(item)
+                
+    config['allowed_jids'] = new_allowed
+    save_user_config(user_id, config)
         
-    return jsonify({"success": True})
+    return jsonify({"status": "success"})
 
-@app.route("/stats")
-def stats():
-    if "user_id" not in session:
-        return jsonify({"today": 0, "total": 0})
-    return jsonify(get_email_stats(session["user_id"]))
-
-@app.route("/disconnect_whatsapp", methods=["POST"])
-def disconnect_whatsapp():
-    if "user_id" not in session:
-        return jsonify({"error": "Unauthorized"}), 401
-    
-    user_id = session["user_id"]
-    
-    # 1. Remove from active clients
-    if user_id in active_clients:
-        # We can't easily 'stop' the neonize client thread cleanly without a stop signal,
-        # but we can remove it from our tracking so a new one starts.
-        # Ideally, neonize client has a .disconnect() method.
-        try:
-            # active_clients[user_id].disconnect() # If available
-            del active_clients[user_id]
-        except:
-            pass
-            
-    # 2. Clear QR Data
-    if user_id in qr_data_store:
-        del qr_data_store[user_id]
-        
-    # 3. Delete Session File (Force new QR)
-    db_path = get_user_db_path(user_id)
-    if os.path.exists(db_path):
-        try:
-            os.remove(db_path)
-            print(f"[User {user_id}] Session file deleted for fresh login.")
-        except Exception as e:
-            print(f"[User {user_id}] Error deleting session file: {e}")
-            
-    return jsonify({"success": True})
-
-# --- MAIN ---
-if __name__ == "__main__":
-    # Initialize DB on start
+if __name__ == '__main__':
     init_db()
-    print("Multi-User WhatsApp Manager Running...")
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)

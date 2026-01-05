@@ -200,3 +200,24 @@ h6 {
     color: var(--text-color);
     font-size: 16px;
 }
+
+/* Status Badges */
+.status-badge {
+    padding: 0.5rem 1rem;
+    border-radius: 20px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.status-connected {
+    background-color: #d1fae5;
+    color: #065f46;
+}
+
+.status-disconnected {
+    background-color: #fee2e2;
+    color: #991b1b;
+}

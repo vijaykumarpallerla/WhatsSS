@@ -11,58 +11,78 @@
 </head>
 
 <body>
-    <div class="auth-container">
-        <div class="auth-card text-center">
-            <div class="auth-header mb-4">
-                <div class="auth-logo">
-                    <i class="fab fa-whatsapp"></i>
-                </div>
-                <h3>Connect WhatsApp</h3>
-                <p class="text-muted">Scan the QR code to link your device</p>
-            </div>
+    <div class="container d-flex justify-content-center align-items-center" style="min-height:80vh;">
+        <div class="card p-4 text-center" style="max-width:420px; width:100%;">
+            <h4 class="mb-3"><i class="fab fa-whatsapp text-success"></i> Connect WhatsApp</h4>
+            <p class="text-muted">Scan this QR with WhatsApp (Linked Devices → Link a Device)</p>
 
-            <div id="qr-display" class="mb-4">
+            <div id="qr-area" class="my-3">
                 <div class="spinner-border text-primary" role="status">
                     <span class="visually-hidden">Loading...</span>
                 </div>
             </div>
 
-            <div id="status-message" class="alert alert-light border mb-4">
-                <i class="fas fa-sync fa-spin me-2 text-primary"></i> Waiting for QR code...
-            </div>
+            <div id="status-area" class="mb-2"></div>
 
-            <a href="/" class="btn btn-outline-secondary rounded-pill px-4">
-                <i class="fas fa-arrow-left me-2"></i> Back to Dashboard
-            </a>
+            <div id="instructions" class="small text-muted">Open WhatsApp → Linked Devices → Link a Device</div>
         </div>
     </div>
 
     <script>
-        function checkStatus() {
-            fetch('/qr_status')
-                .then(response => {
-                    if (response.status === 401) window.location.href = '/login';
-                    return response.json();
-                })
-                .then(data => {
-                    const qrDisplay = document.getElementById('qr-display');
-                    const statusMsg = document.getElementById('status-message');
+        function updateUI(data) {
+            const qrArea = document.getElementById('qr-area');
+            const statusArea = document.getElementById('status-area');
+            const instructions = document.getElementById('instructions');
 
-                    if (data.connected) {
-                        qrDisplay.innerHTML = '<i class="fas fa-check-circle text-success fa-5x"></i>';
-                        statusMsg.className = 'alert alert-success';
-                        statusMsg.innerHTML = '<i class="fas fa-check me-2"></i> Connected Successfully!';
-                        setTimeout(() => window.location.href = '/', 2000);
-                    } else if (data.code) {
-                        qrDisplay.innerHTML = `<img src="data:image/png;base64,${data.code}" class="img-fluid rounded" style="max-width: 250px">`;
-                        statusMsg.className = 'alert alert-info';
-                        statusMsg.innerHTML = '<i class="fas fa-camera me-2"></i> Scan this code with WhatsApp';
-                    }
-                })
-                .catch(err => console.error(err));
+            if (data.connected) {
+                qrArea.innerHTML = '<i class="fas fa-check-circle text-success fa-4x"></i>';
+                statusArea.innerHTML = '<div class="status-badge status-connected">\u25CF Connected</div>';
+                instructions.textContent = 'Bot is connected and running.';
+            } else if (data.code) {
+                qrArea.innerHTML = `<img src="data:image/png;base64,${data.code}" style="max-width:260px;" class="img-fluid"/>`;
+                statusArea.innerHTML = '<div class="status-badge status-disconnected">\u25CF Disconnected</div>';
+                instructions.textContent = 'Scan this code with WhatsApp to connect.';
+            } else {
+                qrArea.innerHTML = '<div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div>';
+                statusArea.innerHTML = '<div class="status-badge status-disconnected">\u25CF Disconnected</div>';
+                instructions.textContent = 'Initializing...';
+            }
         }
 
-        setInterval(checkStatus, 2000);
+        async function checkStatus() {
+            try {
+                const resp = await fetch('/qr_status');
+                if (resp.status === 401) {
+                    window.location.href = '/login';
+                    return;
+                }
+                const data = await resp.json();
+                updateUI(data);
+            } catch (e) {
+                console.error('checkStatus error', e);
+            }
+        }
+
+        // SSE Setup
+        if (window.EventSource) {
+            const es = new EventSource('/qr_stream');
+            es.onmessage = function (e) {
+                try {
+                    const data = JSON.parse(e.data);
+                    if (data.error) return;
+                    updateUI(data);
+                } catch (err) { console.error(err); }
+            };
+            es.onerror = function () {
+                es.close();
+                // Fallback to polling
+                setInterval(checkStatus, 2000);
+            };
+        } else {
+            setInterval(checkStatus, 2000);
+        }
+
+        // Initial check
         checkStatus();
     </script>
 </body>

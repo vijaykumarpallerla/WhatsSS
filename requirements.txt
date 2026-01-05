@@ -1,8 +1,10 @@
 flask
 psycopg2-binary
-neonize==0.3.12
+neonize
+google-auth-oauthlib
+google-api-python-client
 groq
 qrcode
 pillow
+gunicorn
 requests
-protobuf

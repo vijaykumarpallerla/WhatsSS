@@ -108,38 +108,30 @@
     </nav>
 
     <div class="dashboard-container">
-        {% if message %}
-        <div class="alert alert-success alert-dismissible fade show mb-4" role="alert">
-            <i class="fas fa-check-circle me-2"></i> {{ message }}
-            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-        </div>
-        {% endif %}
-
         <div class="row">
             <!-- Left Column: Settings -->
-            <div class="col-lg-8">
+            <div class="col-lg-6">
                 <div class="custom-card mb-4">
-                    <form action="/save" method="POST" onkeydown="return event.key != 'Enter';">
+                    <form action="/update_config" method="POST">
+                        {% if message %}
+                        <div class="alert alert-success alert-dismissible fade show mb-4" role="alert">
+                            <i class="fas fa-check-circle me-2"></i> {{ message }}
+                            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                        </div>
+                        {% endif %}
+
                         <!-- Email Settings -->
                         <div class="mb-4">
-                            <div class="section-title"><i class="fas fa-envelope"></i> Email Settings</div>
-                            <div class="row g-3">
-                                <div class="col-md-6">
-                                    <label class="form-label">Gmail Address <span class="text-danger">*</span></label>
-                                    <input type="email" class="form-control" name="email_user"
-                                        value="{{ config.email_user }}" placeholder="your-email@gmail.com" required>
-                                </div>
-                                <div class="col-md-6">
-                                    <label class="form-label">App Password <span class="text-danger">*</span></label>
-                                    <input type="password" class="form-control" name="email_pass"
-                                        value="{{ config.email_pass }}" placeholder="xxxx xxxx xxxx xxxx" required>
-                                </div>
-                                <div class="col-12">
-                                    <label class="form-label">Destination Email <span
-                                            class="text-danger">*</span></label>
-                                    <input type="email" class="form-control" name="dest_email"
-                                        value="{{ config.dest_email }}" placeholder="manager@company.com" required>
-                                </div>
+                            <div class="section-title"><i class="fas fa-envelope"></i> Email Configuration</div>
+                            <label class="form-label">Destination Email <span class="text-danger">*</span></label>
+                            <div class="input-group">
+                                <span class="input-group-text bg-light"><i class="fas fa-at text-muted"></i></span>
+                                <input type="email" class="form-control" name="dest_email"
+                                    value="{{ config.dest_email }}" placeholder="recipient@example.com" required>
+                            </div>
+                            <div class="form-text text-muted mt-1">
+                                <i class="fas fa-info-circle me-1"></i> Emails will be sent FROM your logged-in Gmail
+                                account.
                             </div>
                         </div>
 
@@ -210,7 +202,7 @@
             </div>
 
             <!-- Right Column: Live Feed & QR -->
-            <div class="col-lg-4">
+            <div class="col-lg-6">
                 <!-- QR Code Card -->
                 <div class="custom-card mb-4 text-center">
                     <h5 class="mb-3">WhatsApp Connection</h5>
@@ -220,8 +212,11 @@
                         </div>
                     </div>
                     <div id="connection-status" class="mb-2"></div>
-                    <p class="small text-muted mb-0" id="qr-instructions">Scan with WhatsApp to
-                        connect</p>
+                    <div class="d-grid gap-2">
+                        <button id="connect-btn" class="btn btn-success btn-sm" onclick="connectWhatsApp()">Connect
+                            WhatsApp</button>
+                    </div>
+                    <p class="small text-muted mb-0 mt-2" id="qr-instructions">Scan with WhatsApp to connect</p>
                 </div>
 
                 <!-- Live Groups Feed -->
@@ -250,8 +245,7 @@
                 <div class="modal-header">
                     <div class="d-flex flex-column w-100">
                         <div class="d-flex justify-content-between align-items-center">
-                            <h5 class="modal-title text-truncate pe-2" id="modalTitle">Message
-                                Details</h5>
+                            <h5 class="modal-title text-truncate pe-2" id="modalTitle">Message Details</h5>
                             <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                         </div>
                         <div id="modalActions" class="mt-2">
@@ -300,15 +294,37 @@
                     const qrContainer = document.getElementById('qr-container');
                     const statusBadge = document.getElementById('connection-status');
                     const instructions = document.getElementById('qr-instructions');
+                    const connectBtn = document.getElementById('connect-btn');
 
                     if (data.connected) {
                         qrContainer.innerHTML = '<i class="fas fa-check-circle text-success fa-4x mb-2"></i>';
                         statusBadge.innerHTML = '<span class="status-badge status-connected"><i class="fas fa-circle fa-xs"></i> Connected</span>';
                         instructions.textContent = 'Bot is active and running';
+                        if (connectBtn) {
+                            connectBtn.disabled = true;
+                            connectBtn.innerHTML = 'Connected';
+                            connectBtn.classList.remove('btn-success');
+                            connectBtn.classList.add('btn-secondary');
+                        }
                     } else if (data.code) {
                         qrContainer.innerHTML = `<img src="data:image/png;base64,${data.code}" class="img-fluid" style="max-width: 200px">`;
                         statusBadge.innerHTML = '<span class="status-badge status-disconnected"><i class="fas fa-circle fa-xs"></i> Disconnected</span>';
                         instructions.textContent = 'Open WhatsApp > Linked Devices > Link a Device';
+                        if (connectBtn) {
+                            connectBtn.disabled = true;
+                            connectBtn.innerHTML = 'Scan QR';
+                        }
+                    } else {
+                        // No client started yet
+                        qrContainer.innerHTML = '<div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div>';
+                        statusBadge.innerHTML = '';
+                        instructions.textContent = 'Scan with WhatsApp to connect';
+                        if (connectBtn) {
+                            connectBtn.disabled = false;
+                            connectBtn.innerHTML = 'Connect WhatsApp';
+                            connectBtn.classList.remove('btn-secondary');
+                            connectBtn.classList.add('btn-success');
+                        }
                     }
                 })
                 .catch(err => console.error("Status Error:", err));
@@ -345,24 +361,24 @@
                         }
 
                         const item = document.createElement('div');
-                        item.className = 'list-group-item p-3';
+                        item.className = 'list-group-item p-4 mb-3 shadow-sm border-0'; // Increased padding, margin, shadow
                         item.id = `group-card-${groupId}`;
                         item.innerHTML = `
-                            <div class="d-flex justify-content-between align-items-start mb-2">
-                                <div>
-                                    <div class="fw-bold text-truncate" style="max-width: 150px;">${groupId}</div>
+                            <div class="d-flex justify-content-between align-items-center mb-3">
+                                <div class="me-3">
+                                    <div class="fw-bold text-truncate" style="max-width: 200px; font-size: 1.1rem;">${groupId}</div>
                                     <small class="text-muted">${lastMsg ? lastMsg.timestamp : ''}</small>
                                 </div>
                                 <div id="btn-container-${groupId}">
                                     ${isWhitelisted
-                                ? `<button class="btn btn-sm btn-outline-danger rounded-pill" onclick="removeFromWhitelist('${groupId}')"><i class="fas fa-minus"></i> Remove</button>`
-                                : `<button class="btn btn-sm btn-primary rounded-pill" onclick="addToWhitelist('${groupId}')"><i class="fas fa-plus"></i> Add</button>`
+                                ? `<button class="btn btn-outline-danger rounded-pill px-3 py-2" onclick="removeFromWhitelist('${groupId}')"><i class="fas fa-minus me-1"></i> Remove</button>`
+                                : `<button class="btn btn-primary rounded-pill px-3 py-2" onclick="addToWhitelist('${groupId}')"><i class="fas fa-plus me-1"></i> Add</button>`
                             }
                                 </div>
                             </div>
-                            <div class="p-2 bg-light rounded" style="cursor: pointer;" onclick="showFullMessage('${groupId}')">
-                                <p class="mb-0 small text-muted text-truncate">${lastMsg ? lastMsg.sender + ': ' + lastMsg.text : 'No text'}</p>
-                                <small class="text-primary" style="font-size: 0.75rem;">Click to read more</small>
+                            <div class="p-3 bg-light rounded-3" style="cursor: pointer;" onclick="showFullMessage('${groupId}')">
+                                <p class="mb-1 text-secondary text-truncate" style="font-size: 0.95rem;">${lastMsg ? lastMsg.sender + ': ' + lastMsg.text : 'No text'}</p>
+                                <small class="text-primary fw-bold" style="font-size: 0.85rem;">Click to read more</small>
                             </div>
                         `;
                         list.appendChild(item);
@@ -428,11 +444,75 @@
             });
         }
 
-        // Poll every 3 seconds
-        setInterval(updateStatus, 3000);
+        // Use Server-Sent Events for live status updates; fallback to polling
+        if (window.EventSource) {
+            const es = new EventSource('/qr_stream');
+            es.onmessage = function (e) {
+                try {
+                    const data = JSON.parse(e.data);
+                    if (data.error) {
+                        console.error('QR Stream error:', data.error);
+                        return;
+                    }
+                    // Reuse updateStatus UI logic by feeding the fetched data
+                    const qrContainer = document.getElementById('qr-container');
+                    const statusBadge = document.getElementById('connection-status');
+                    const instructions = document.getElementById('qr-instructions');
+                    const connectBtn = document.getElementById('connect-btn');
+
+                    if (data.connected) {
+                        qrContainer.innerHTML = '<i class="fas fa-check-circle text-success fa-4x mb-2"></i>';
+                        statusBadge.innerHTML = '<span class="status-badge status-connected"><i class="fas fa-circle fa-xs"></i> Connected</span>';
+                        instructions.textContent = 'Bot is active and running';
+                        if (connectBtn) { connectBtn.disabled = true; connectBtn.innerHTML = 'Connected'; connectBtn.classList.remove('btn-success'); connectBtn.classList.add('btn-secondary'); }
+                    } else if (data.code) {
+                        qrContainer.innerHTML = `<img src="data:image/png;base64,${data.code}" class="img-fluid" style="max-width: 200px">`;
+                        statusBadge.innerHTML = '<span class="status-badge status-disconnected"><i class="fas fa-circle fa-xs"></i> Disconnected</span>';
+                        instructions.textContent = 'Open WhatsApp > Linked Devices > Link a Device';
+                        if (connectBtn) { connectBtn.disabled = true; connectBtn.innerHTML = 'Scan QR'; }
+                    } else {
+                        qrContainer.innerHTML = '<div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div>';
+                        statusBadge.innerHTML = '';
+                        instructions.textContent = 'Scan with WhatsApp to connect';
+                        if (connectBtn) { connectBtn.disabled = false; connectBtn.innerHTML = 'Connect WhatsApp'; connectBtn.classList.remove('btn-secondary'); connectBtn.classList.add('btn-success'); }
+                    }
+                } catch (err) { console.error('SSE parse error', err); }
+            };
+            es.onerror = function (e) {
+                console.error('EventSource error', e);
+                es.close();
+                // fallback to polling if SSE fails
+                updateStatus();
+                setInterval(updateStatus, 3000);
+            };
+            // initial fetch to populate immediately in case no SSE data yet
+            updateStatus();
+        } else {
+            // older browsers: poll
+            setInterval(updateStatus, 3000);
+            updateStatus();
+        }
         setInterval(fetchGroupMessages, 3000);
-        updateStatus();
-        fetchGroupMessages();
+
+        // --- Connect WhatsApp (AJAX) ---
+        async function connectWhatsApp() {
+            const btn = document.getElementById('connect-btn');
+            if (!btn) return;
+            btn.disabled = true;
+            const prevText = btn.innerHTML;
+            btn.innerHTML = 'Starting...';
+            try {
+                // Trigger server route that starts the client thread
+                const r = await fetch('/connect_whatsapp');
+                // keep polling status; UI will update when qr appears
+                setTimeout(() => updateStatus(), 1000);
+            } catch (e) {
+                console.error('connectWhatsApp error', e);
+                btn.disabled = false;
+                btn.innerHTML = prevText;
+            }
+        }
+
 
         // --- Email Validation Logic ---
         const destEmailInput = document.querySelector('input[name="dest_email"]');

@@ -24,6 +24,8 @@ dist/
 # Config (if contains sensitive data)
 config.json
 history.json
+google.json
+.env
 
 # Logs
 *.log
