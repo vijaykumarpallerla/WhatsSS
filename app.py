@@ -14,7 +14,7 @@ import io
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from pathlib import Path
-from flask import Flask, render_template, request, redirect, url_for, jsonify, session, flash, Response, stream_with_context
+from flask import Flask, render_template, request, redirect, url_for, jsonify, session, flash, Response, stream_with_context, send_file
 from werkzeug.security import generate_password_hash, check_password_hash # Keeping for safety, though unused
 from neonize.client import NewClient
 from neonize.events import ConnectedEv, MessageEv, PairStatusEv, LoggedOutEv, QREv
@@ -441,9 +441,15 @@ def get_client(user_id):
             img = qr.make_image(fill_color="black", back_color="white")
             buffered = io.BytesIO()
             img.save(buffered, format='PNG')
-            qr_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-            qr_data_store[user_id] = {"code": qr_base64, "connected": False}
-            print(f"[User {user_id}] New QR Code Generated", flush=True)
+
+            # Persist QR image to a file so other gunicorn workers / processes can serve it
+            filename = f"qr_user_{user_id}.png"
+            filepath = os.path.join(USER_DATA_FOLDER, filename)
+            with open(filepath, 'wb') as f:
+                f.write(buffered.getvalue())
+
+            qr_data_store[user_id] = {"code": None, "connected": False, "file": filename}
+            print(f"[User {user_id}] New QR Code Generated -> {filepath}", flush=True)
         except Exception as e:
             print(f"[User {user_id}] Error processing QR callback: {e}", flush=True)
 
@@ -453,18 +459,37 @@ def get_client(user_id):
         try:
             # event.id.id indicates a successful login/pair
             if getattr(event, 'id', None) and getattr(event.id, 'id', None):
-                qr_data_store[user_id] = {"connected": True, "code": None}
+                # Mark connected and remove any saved QR file
+                fn = qr_data_store.get(user_id, {}).get('file')
+                if fn:
+                    try:
+                        os.remove(os.path.join(USER_DATA_FOLDER, fn))
+                    except Exception:
+                        pass
+                qr_data_store[user_id] = {"connected": True, "code": None, "file": None}
         except Exception as e:
             print(f"Error in on_pair_status handler: {e}", flush=True)
 
     @client.event(ConnectedEv)
     def on_connected(client_obj, event: ConnectedEv):
         print(f"Connected Event: {event}", flush=True)
-        qr_data_store[user_id] = {"connected": True, "code": None}
+        fn = qr_data_store.get(user_id, {}).get('file')
+        if fn:
+            try:
+                os.remove(os.path.join(USER_DATA_FOLDER, fn))
+            except Exception:
+                pass
+        qr_data_store[user_id] = {"connected": True, "code": None, "file": None}
 
     @client.event(LoggedOutEv)
     def on_logged_out(client_obj, event: LoggedOutEv):
-        qr_data_store[user_id] = {"connected": False, "code": None}
+        fn = qr_data_store.get(user_id, {}).get('file')
+        if fn:
+            try:
+                os.remove(os.path.join(USER_DATA_FOLDER, fn))
+            except Exception:
+                pass
+        qr_data_store[user_id] = {"connected": False, "code": None, "file": None}
         if user_id in active_clients:
             del active_clients[user_id]
         print(f"Logged out user {user_id}", flush=True)
@@ -652,6 +677,18 @@ def dashboard():
     
     return render_template('index.html', config=config, stats=stats)
 
+
+@app.route('/stats')
+def stats():
+    # Return email-send statistics for the current session user.
+    user_id = session.get('user_id')
+    if not user_id:
+        # Return zeroed stats if no session (keeps frontend polling simple)
+        return jsonify({"today": 0, "total": 0})
+
+    stats = get_email_stats(user_id)
+    return jsonify(stats)
+
 @app.route('/update_config', methods=['POST'])
 def update_config():
     if 'user_id' not in session:
@@ -701,7 +738,24 @@ def qr_status():
     data = qr_data_store.get(user_id)
     if data is None:
         data = qr_data_store.get(None, {"connected": False, "code": None})
-    return jsonify(data)
+    # If a filename is present, convert it to an accessible URL
+    file_name = data.get('file') if isinstance(data, dict) else None
+    result = {k: v for k, v in data.items()} if isinstance(data, dict) else data
+    if file_name:
+        try:
+            result['file_url'] = url_for('qr_image', filename=file_name, _external=True)
+        except Exception:
+            result['file_url'] = None
+    return jsonify(result)
+
+
+@app.route('/qr_image/<path:filename>')
+def qr_image(filename):
+    # Serve QR images from USER_DATA_FOLDER. Prevent path traversal by resolving path.
+    safe_path = os.path.join(USER_DATA_FOLDER, os.path.basename(filename))
+    if not os.path.exists(safe_path):
+        return jsonify({'error': 'not found'}), 404
+    return send_file(safe_path, mimetype='image/png')
 
 
 @app.route('/qr_stream')
