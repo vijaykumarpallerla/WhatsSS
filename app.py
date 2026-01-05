@@ -514,7 +514,34 @@ def get_client(user_id):
                 else:
                     allowed_set.add(item)
 
-            auto_allow = config.get("auto_allow", False)
+            # --- CORRECTED LOGIC START ---
+            
+            # 1. Check Master Toggle (renamed concept in UI to "Enable AI Processing")
+            is_ai_enabled = config.get("auto_allow", False) # We use the existing 'auto_allow' db field as the Master Switch
+            if not is_ai_enabled:
+                print("Ignored: AI Processing is OFF.")
+                return
+
+            # 2. Check Time Window
+            start_time_str = config.get("start_time", "09:00")
+            end_time_str = config.get("end_time", "18:00")
+            
+            # Calculate IST Time for comparison
+            utc_now = datetime.datetime.now(datetime.timezone.utc)
+            ist_now = utc_now + timedelta(hours=5, minutes=30)
+            current_time_str = ist_now.strftime("%H:%M")
+            
+            if not (start_time_str <= current_time_str <= end_time_str):
+                print(f"Ignored: Outside Time Window ({current_time_str} not in {start_time_str}-{end_time_str})")
+                return
+
+            # 3. Check Whitelist
+            # Only process if explicitly whitelisted
+            if chat_jid not in allowed_set:
+                print(f"Ignored: Group {chat_jid} not in whitelist.")
+                return 
+
+            # --- CORRECTED LOGIC END ---
             
             message_text = ""
             
@@ -541,17 +568,6 @@ def get_client(user_id):
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             save_message(user_id, chat_jid, sender_jid, message_text, timestamp)
             
-            # Check whitelist
-            if chat_jid not in allowed_set:
-                if auto_allow:
-                    # Add as object
-                    allowed_jids.append({"jid": chat_jid, "name": "Unknown"})
-                    config['allowed_jids'] = allowed_jids
-                    save_user_config(user_id, config)
-                    print(f"Auto-allowed group: {chat_jid}")
-                else:
-                    return # Not allowed
-
             # Analyze and Send Email
             analysis = analyze_message(config.get("groq_api_key"), message_text)
             if analysis.get("is_usa_hiring"):

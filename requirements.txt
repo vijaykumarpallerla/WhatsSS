@@ -8,3 +8,4 @@ qrcode
 pillow
 gunicorn
 requests
+gevent
