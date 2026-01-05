@@ -308,6 +308,21 @@ def get_qr_from_store(user_id):
                 j = resp.json()
                 v = j.get('result') or j.get('value') or j.get('result_raw') or j.get('value_raw')
                 if v:
+                    # Some Upstash responses store a JSON string as the value, e.g.
+                    # { "result": "{\"value\": \"<base64>\"}" }
+                    # Handle that case by parsing the nested JSON and extracting the inner base64 value.
+                    if isinstance(v, str) and v.strip().startswith('{'):
+                        try:
+                            inner = json.loads(v)
+                            inner_val = inner.get('value') or inner.get('result') or inner.get('value_raw') or inner.get('result_raw')
+                            if inner_val:
+                                try:
+                                    return base64.b64decode(inner_val)
+                                except Exception:
+                                    return inner_val.encode()
+                        except Exception:
+                            # fallthrough to try decoding the original v
+                            pass
                     try:
                         return base64.b64decode(v)
                     except Exception:
